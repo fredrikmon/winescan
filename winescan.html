@@ -55,14 +55,15 @@
     background: linear-gradient(rgba(14,10,11,0), rgba(14,10,11,.85) 40%);
   }
   #result {
-    display: none; align-items: baseline; gap: 12px;
+    display: none; gap: 12px;
     background: var(--badge); color: var(--badge-fg);
     border-radius: 14px; padding: 12px 14px;
   }
   #result.show { display: flex; }
-  #result .score { font-family: var(--font-score); font-weight: 700; font-size: 34px; line-height: 1; white-space: nowrap; }
-  #result .score small { font-size: 14px; font-weight: 500; margin-right: 2px; }
-  #result .name { font-weight: 600; font-size: 15px; }
+  #result .score { font-family: var(--font-score); font-weight: 700; font-size: 30px; line-height: 1.1; white-space: nowrap; }
+  #result .latest { font-size: 15px; color: #5a3a40; margin-left: 6px; }
+  #result .line { margin-top: 4px; display: flex; align-items: baseline; }
+  #result .name { font-weight: 500; font-size: 14px; color: #5a3a40; }
   #result .note { font-size: 13px; color: #5a3a40; margin-top: 2px; line-height: 1.3; }
 
   #controls { display: flex; gap: 8px; align-items: center; }
@@ -106,7 +107,7 @@
 
 <div id="gate">
   <h1>Point the camera at a wine list or a label.</h1>
-  <p>Test build. Nine Finca Sandoval wines are loaded. Text is read on your phone, nothing is uploaded.</p>
+  <p>Test build. Finca Sandoval is in the catalog. Text is read on your phone, nothing is uploaded.</p>
   <button id="start" class="btn primary">Start camera</button>
   <p id="gateMsg"></p>
 </div>
@@ -121,8 +122,9 @@
   <div id="bottom">
     <div id="debug"></div>
     <div id="result">
-      <div class="score"><small>RP</small><span id="rScore"></span></div>
-      <div><div class="name" id="rName"></div><div class="note" id="rNote"></div></div>
+      <div><div class="name" id="rName"></div>
+        <div class="line"><span class="score">Parker <span id="rScore"></span></span> <span class="latest" id="rLatest"></span></div>
+        <div class="note" id="rNote"></div></div>
     </div>
     <div id="controls">
       <div class="seg" role="group" aria-label="Mode">
@@ -138,19 +140,22 @@
 
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js"></script>
 <script>
-// ---------- Data (iteration 1, hardcoded). Notes are draft text, replace freely. ----------
-const WINES = [
-  { id:"fs24-salia", producer:"Finca Sandoval", cuvee:"Salia", vintage:2024, score:"94",  note:"Bright and juicy. Syrah led, fresh red fruit, easy to like." },
-  { id:"fs24-fund",  producer:"Finca Sandoval", cuvee:"Fundamentalista", vintage:2024, score:"92+", note:"Pure Bobal. Taut, mineral, a little wild. Needs air." },
-  { id:"fs24-aurora",producer:"Finca Sandoval", cuvee:"Aurora", vintage:2024, score:"93+", note:"The white. Textured, saline, built for food." },
-  { id:"fs23-base",  producer:"Finca Sandoval", cuvee:"", vintage:2023, score:"95",  note:"The flagship. Deep, layered, polished tannin. Will age." },
-  { id:"fs23-fund",  producer:"Finca Sandoval", cuvee:"Fundamentalista", vintage:2023, score:"93",  note:"Bobal with grip and lift. Honest, serious, unpolished." },
-  { id:"fs23-aurora",producer:"Finca Sandoval", cuvee:"Aurora", vintage:2023, score:"94",  note:"Ripe but tense white. Stone fruit, chalk, long finish." },
-  { id:"fs22-base",  producer:"Finca Sandoval", cuvee:"", vintage:2022, score:"95",  note:"Warm year, cool wine. Dense fruit, fine structure." },
-  { id:"fs22-salia", producer:"Finca Sandoval", cuvee:"Salia", vintage:2022, score:"93+", note:"More concentration than usual Salia. Still fresh." },
-  { id:"fs22-fund",  producer:"Finca Sandoval", cuvee:"Fundamentalista", vintage:2022, score:"92+", note:"Rustic edge, dark fruit, firm acidity. Drink with lamb." },
+// ---------- Catalog. Add producers and wines here; matching is data driven. ----------
+// keys: words that identify the entry in OCR text. hints: other label words that prove the producer.
+// A wine with no keys is the producer's base wine, used when no other wine key is found.
+const CATALOG = [
+  {
+    country: "Spain", region: "Manchuela", producer: "Finca Sandoval",
+    keys: ["sandoval", "fincasandoval"],
+    hints: ["ledana", "casablanca", "suelocalcareo", "vinosconalma", "manchuela"],
+    wines: [
+      { name: "Finca Sandoval", keys: [], scores: { 2023: "95", 2022: "95" } },
+      { name: "Salia",          keys: ["salia"],           scores: { 2024: "94",  2022: "93+" } },
+      { name: "Fundamentalista",keys: ["fundamentalista"], scores: { 2024: "92+", 2023: "93", 2022: "92+" } },
+      { name: "Aurora",         keys: ["aurora"],          scores: { 2024: "93+", 2023: "94" } },
+    ],
+  },
 ];
-const CUVEES = ["salia", "fundamentalista", "aurora"];
 
 // ---------- Matching ----------
 function norm(s) {
@@ -170,41 +175,59 @@ function lev(a, b) {
   }
   return prev[n];
 }
+function tolFor(word) { return word.length >= 10 ? 2 : word.length >= 6 ? 1 : 0; }
 function tokenMatches(tok, word) {
   if (tok === word) return true;
   const tol = word.length >= 10 ? 3 : word.length >= 6 ? 2 : word.length >= 4 ? 1 : 0;
   return Math.abs(tok.length - word.length) <= tol && lev(tok, word) <= tol;
 }
+// Fuzzy substring: does `word` appear inside `hay` with at most `tol` edits?
+function fuzzyIn(hay, word, tol) {
+  if (hay.includes(word)) return true;
+  const L = word.length;
+  for (let i = 0; i + L - tol <= hay.length; i++) {
+    for (const len of [L - 1, L, L + 1]) {
+      if (len <= 0 || i + len > hay.length) continue;
+      if (lev(hay.slice(i, i + len), word) <= tol) return true;
+    }
+  }
+  return false;
+}
+function keyHit(tokens, glued, word) {
+  return tokens.some(t => tokenMatches(t, word)) || fuzzyIn(glued, word, Math.max(tolFor(word), word.length >= 8 ? 2 : 0));
+}
 // OCR often misreads 0/O, 1/l, 5/S in years. Normalize before matching.
 function findVintage(tokens) {
   for (const t of tokens) {
     const fixed = t.replace(/o/g, "0").replace(/[il|]/g, "1").replace(/s/g, "5").replace(/z/g, "2").replace(/b/g, "8");
-    const m = fixed.match(/^(19|20)\d\d$/);
-    if (m) { const y = +fixed; if (y >= 2000 && y <= 2030) return y; }
+    if (/^(19|20)\d\d$/.test(fixed)) { const y = +fixed; if (y >= 1990 && y <= 2030) return y; }
   }
   return null;
 }
-function extract(text) {
+function latestVintage(w) { return Math.max(...Object.keys(w.scores).map(Number)); }
+
+// Returns {producer, wine, vintage, latest} or null.
+function identify(text, strict) {
   const tokens = norm(text).split(" ").filter(Boolean);
-  const producer = tokens.some(t => tokenMatches(t, "sandoval")) || (tokens.some(t => tokenMatches(t, "finca")) && tokens.some(t => t.length >= 6 && lev(t, "sandoval") <= 4));
-  let cuvee = null;
-  for (const c of CUVEES) if (tokens.some(t => tokenMatches(t, c))) { cuvee = c; break; }
-  return { producer, cuvee, vintage: findVintage(tokens), tokens };
-}
-function pick(ex, strict) {
-  if (!ex.producer) return null;
-  const cuvee = ex.cuvee ? ex.cuvee : "";
-  let cands = WINES.filter(w => w.cuvee.toLowerCase() === cuvee);
-  if (ex.vintage) {
-    const exact = cands.filter(w => w.vintage === ex.vintage);
-    if (exact.length) return exact[0];
-    if (strict) return null;
+  const glued = tokens.join("");
+  const vintage = findVintage(tokens);
+  let best = null;
+  for (const p of CATALOG) {
+    const byKey = p.keys.some(k => keyHit(tokens, glued, k));
+    const hintCount = (p.hints || []).filter(h => fuzzyIn(glued, h, tolFor(h))).length;
+    if (!byKey && hintCount < 2) continue;
+    let wine = null;
+    for (const w of p.wines) if (w.keys.length && w.keys.some(k => keyHit(tokens, glued, k))) { wine = w; break; }
+    if (!wine) wine = p.wines.find(w => !w.keys.length) || null;
+    if (!wine) continue;
+    if (strict && !vintage) continue;
+    const r = { producer: p, wine, vintage, latest: latestVintage(wine), score: wine.scores[latestVintage(wine)] };
+    if (vintage) r.scanned = wine.scores[vintage] || null;
+    if (!best || (byKey && !best.byKey)) best = Object.assign(r, { byKey });
   }
-  if (strict && !ex.vintage) return null;
-  // No vintage read: show newest, flagged.
-  cands.sort((a, b) => b.vintage - a.vintage);
-  return cands.length ? Object.assign({}, cands[0], { approx: true }) : null;
+  return best;
 }
+function pathOf(r) { return `${r.producer.country} > ${r.producer.region} > ${r.producer.producer} > ${r.wine.name}`; }
 
 // ---------- Camera and OCR ----------
 const video = document.getElementById("video");
@@ -305,26 +328,25 @@ function handleLines(lines, fullText) {
     // Per line, plus a two-line window so a wrapped name still matches.
     const texts = lines.map((l, i) => [l, i < lines.length - 1 ? l.text + " " + lines[i+1].text : null]);
     for (const [l, pair] of texts) {
-      let w = pick(extract(l.text), true);
-      if (!w && pair) w = pick(extract(pair), true);
-      if (w) sticky.set(w.id + "@" + Math.round(l.bbox.y0 / 25), { wine: w, box: l.bbox, until: now + 2500 });
+      let r = identify(l.text, true);
+      if (!r && pair) r = identify(pair, true);
+      if (r) sticky.set(r.wine.name + "@" + Math.round(l.bbox.y0 / 25), { r, box: l.bbox, until: now + 2500 });
     }
-    // Best match for the summary card
     const live = [...sticky.values()].filter(s => s.until > now);
-    if (live.length) {
-      const top = live.sort((a, b) => a.box.y0 - b.box.y0)[0];
-      showResult(top.wine, now + 2500);
-    }
+    if (live.length) showResult(live.sort((a, b) => a.box.y0 - b.box.y0)[0].r, now + 2500);
   } else {
-    const w = pick(extract(fullText), false);
-    if (w) showResult(w, now + 3000);
+    const r = identify(fullText, false);
+    if (r) showResult(r, now + 3000);
   }
 }
 
-function showResult(w, until) {
-  document.getElementById("rScore").textContent = w.score;
-  document.getElementById("rName").textContent = `${w.vintage} ${w.producer}${w.cuvee ? " " + w.cuvee : ""}${w.approx ? " (vintage not read)" : ""}`;
-  document.getElementById("rNote").textContent = w.note;
+function showResult(r, until) {
+  document.getElementById("rScore").textContent = r.score + "p";
+  document.getElementById("rLatest").textContent = `(${r.latest})`;
+  document.getElementById("rName").textContent = pathOf(r);
+  let note = "";
+  if (r.vintage && r.vintage !== r.latest) note = r.scanned ? `Scanned ${r.vintage}: Parker ${r.scanned}p` : `Scanned ${r.vintage}: not rated`;
+  document.getElementById("rNote").textContent = note;
   resultEl.classList.add("show");
   lastResult.until = until;
 }
@@ -345,7 +367,7 @@ function drawOverlay() {
     octx.strokeStyle = "rgba(246,239,232,.9)"; octx.lineWidth = 1.5;
     octx.beginPath(); octx.moveTo(x0, y1 + 3); octx.lineTo(x1, y1 + 3); octx.stroke();
     // score badge at the right end of the line
-    const label = "RP " + s.wine.score;
+    const label = "Parker " + s.r.score + "p";
     octx.font = "700 17px Fraunces, Georgia, serif";
     const tw = octx.measureText(label).width;
     const bw = tw + 18, bh = 28;
