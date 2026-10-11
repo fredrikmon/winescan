@@ -121,6 +121,18 @@
   #sheet .vint b { font-family: var(--font-score); font-size: 17px; }
   #sheet .close { position: absolute; right: 14px; top: 12px; border: 0; background: #e6dcd3; color: #2a0f14; width: 32px; height: 32px; border-radius: 50%; font-size: 18px; cursor: pointer; }
   #overlay { pointer-events: auto; }
+  #manual { position: fixed; left: 0; right: 0; bottom: 0; z-index: 21; background: var(--badge); color: var(--badge-fg);
+    border-radius: 20px 20px 0 0; padding: 18px 20px calc(env(safe-area-inset-bottom, 0px) + 22px);
+    transform: translateY(105%); transition: transform .24s ease-out; }
+  #manual.show { transform: none; }
+  #manual h2 { font-family: var(--font-score); font-weight: 700; font-size: 24px; margin: 0 0 4px; }
+  #manual p { font-size: 14px; color: #5a3a40; margin: 0 0 12px; }
+  #manual label { display: block; font-size: 12px; color: #5a3a40; margin: 10px 0 4px; letter-spacing: .06em; text-transform: uppercase; }
+  #manual input { width: 100%; font: 17px var(--font-ui); padding: 11px 12px; border: 1px solid #c9b8b0; border-radius: 10px; background: #fff; color: var(--badge-fg); }
+  #manual .actions { display: flex; gap: 8px; margin-top: 16px; }
+  #manual .btn.primary { background: var(--badge-fg); color: var(--badge); flex: 1; }
+  #manual .btn.ghost { background: #e6dcd3; color: var(--badge-fg); }
+  #manual .err { color: #a3263e; font-size: 14px; margin-top: 8px; min-height: 18px; }
   #result { cursor: pointer; }
   @media (prefers-reduced-motion: no-preference) {
     #result.show { animation: pop .18s ease-out; }
@@ -176,27 +188,42 @@
   <div id="sVintages"></div>
 </div>
 
+<div id="manual" role="dialog" aria-modal="true">
+  <h2>Which producer?</h2>
+  <p>Nothing matched the label. Type the producer, and the wine if you know it.</p>
+  <label for="mProducer">Producer</label>
+  <input id="mProducer" type="text" autocomplete="off" autocapitalize="words" placeholder="e.g. Finca Sandoval">
+  <label for="mWine">Wine (optional)</label>
+  <input id="mWine" type="text" autocomplete="off" autocapitalize="words" placeholder="e.g. Salia">
+  <div class="err" id="mErr"></div>
+  <div class="actions">
+    <button class="btn ghost" id="mCancel">Cancel</button>
+    <button class="btn primary" id="mGo">Find</button>
+  </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js"></script>
 <script>
 // ---------- Catalog. Add producers and wines here; matching is data driven. ----------
 // keys: words that identify the entry in OCR text. hints: other label words that prove the producer.
 // A wine with no keys is the producer's base wine, used when no other wine key is found.
+// unique: the wine name alone identifies the producer (no other producer uses it).
 const CATALOG = [
   {
     country: "Spain", region: "Manchuela", producer: "Finca Sandoval",
     keys: ["sandoval", "fincasandoval"],
-    hints: ["ledana", "casablanca", "suelocalcareo", "vinosconalma", "manchuela"],
+    hints: ["ledana", "casablanca", "calcareo", "vinosconalma", "manchuela", "vinodepueblo", "cepasviejas", "autoctonas"],
     wines: [
       { name: "Finca Sandoval", keys: [], scores: { 2023: "95", 2022: "95" },
         grapes: "Syrah, Bobal", style: "Red · full bodied",
         notes: "The flagship. Old vines on limestone at 900 m. Dense dark fruit, fine tannin, long finish. Built to age ten years or more." },
-      { name: "Salia", keys: ["salia"], scores: { 2024: "94", 2022: "93+" },
+      { name: "Salia", keys: ["salia"], unique: false, scores: { 2024: "94", 2022: "93+" },
         grapes: "Syrah, Garnacha Tintorera, Bobal", style: "Red · medium bodied",
         notes: "The approachable red. Bright red fruit, pepper, fresh acidity. Drinks well young with grilled meat or charcuterie." },
-      { name: "Fundamentalista", keys: ["fundamentalista"], scores: { 2024: "92+", 2023: "93", 2022: "92+" },
+      { name: "Fundamentalista", keys: ["fundamentalista"], unique: true, scores: { 2024: "92+", 2023: "93", 2022: "92+" },
         grapes: "Bobal", style: "Red · mineral",
         notes: "Pure Bobal from old vines. Taut, savory, a little wild. Needs air or a few years. Lamb, game, aged cheese." },
-      { name: "Aurora", keys: ["aurora"], scores: { 2024: "93+", 2023: "94" },
+      { name: "Aurora", keys: ["aurora"], unique: false, scores: { 2024: "93+", 2023: "94" },
         grapes: "White blend", style: "White · textured",
         notes: "The white. Stone fruit, chalk, saline length. Serve cool but not cold. Fish, rice dishes, soft cheese." },
     ],
@@ -262,9 +289,11 @@ function identify(text, strict) {
   for (const p of CATALOG) {
     const byKey = p.keys.some(k => keyHit(tokens, glued, k));
     const hintCount = (p.hints || []).filter(h => fuzzyIn(glued, h, tolFor(h))).length;
-    if (!byKey && hintCount < 2) continue;
     let wine = null;
     for (const w of p.wines) if (w.keys.length && w.keys.some(k => keyHit(tokens, glued, k))) { wine = w; break; }
+    // Evidence: producer name, or two label hints, or a distinctive wine name, or a wine name plus one hint.
+    const ok = byKey || hintCount >= 2 || (wine && (wine.unique || hintCount >= 1));
+    if (!ok) continue;
     if (!wine) wine = p.wines.find(w => !w.keys.length) || null;
     if (!wine) continue;
     if (strict && !vintage) continue;
@@ -290,6 +319,7 @@ const wctx = work.getContext("2d", { willReadFrequently: true });
 
 let mode = "list", frozen = false, busy = false, worker = null, raf = 0;
 let results = [];      // [{r, box}] from the last scan
+let labelText = [];    // label mode: text from each photo in this session, combined for matching
 let currentResult = null, badgeRects = [], sheetOpen = false;
 let lastResult = { until: 0 };
 const CROP = 0.10;     // skip top/bottom band of the frame (covered by UI)
@@ -380,19 +410,32 @@ async function scan() {
       currentResult = results.length ? results[0].r : null; // card is only used in label mode
       setStatus(results.length ? `${results.length} wine${results.length > 1 ? "s" : ""} found · ${ms} ms` : `No match · ${ms} ms`, true);
     } else {
-      const r = identify(data.text || "", false);
-      if (r) showResult(r);
-      setStatus(r ? `Match · ${ms} ms` : `No match · ${ms} ms`, true);
+      labelText.push(data.text || "");
+      const r = identify(labelText.join("\n"), false);
+      if (r) {
+        showResult(r);
+        setStatus(`Match · ${ms} ms`, true);
+        scanBtn.textContent = "Back to live";
+      } else if (labelText.length < 2) {
+        setStatus("No match. Scan the back label or more text.", true);
+        scanBtn.textContent = "Add photo";
+        video.play(); frozen = false; // back to live so the next photo can be framed
+      } else {
+        setStatus("No match after 2 photos. Enter the producer.", true);
+        scanBtn.textContent = "Back to live";
+        openManual();
+      }
     }
   } catch (e) {
     setStatus("Read failed: " + (e.message || e));
   } finally {
-    busy = false; scanBtn.disabled = false; scanBtn.textContent = "Back to live";
+    busy = false; scanBtn.disabled = false;
+    if (mode === "list") scanBtn.textContent = "Back to live";
     drawOverlay();
   }
 }
 function unfreeze() {
-  frozen = false; results = []; badgeRects = []; currentResult = null;
+  frozen = false; results = []; badgeRects = []; currentResult = null; labelText = [];
   resultEl.classList.remove("show"); video.play();
   scanBtn.textContent = "Scan"; setStatus("Live. Tap Scan.", true);
   drawOverlay();
@@ -488,6 +531,25 @@ let touchY = null;
 document.getElementById("sheet").addEventListener("touchstart", e => { touchY = e.touches[0].clientY; }, { passive: true });
 document.getElementById("sheet").addEventListener("touchend", e => { if (touchY !== null && e.changedTouches[0].clientY - touchY > 70 && document.getElementById("sheet").scrollTop === 0) closeSheet(); touchY = null; }, { passive: true });
 
+// ---------- Manual entry ----------
+const manualEl = document.getElementById("manual");
+function openManual() {
+  document.getElementById("mErr").textContent = "";
+  document.getElementById("sheetBg").classList.add("show");
+  manualEl.classList.add("show");
+  setTimeout(() => document.getElementById("mProducer").focus(), 250);
+}
+function closeManual() { manualEl.classList.remove("show"); document.getElementById("sheetBg").classList.remove("show"); }
+document.getElementById("mCancel").addEventListener("click", closeManual);
+document.getElementById("mGo").addEventListener("click", () => {
+  const typed = document.getElementById("mProducer").value + " " + document.getElementById("mWine").value;
+  const r = identify(labelText.join("\n") + "\n" + typed, false);
+  if (!r) { document.getElementById("mErr").textContent = "Still no match. Not in the catalog yet."; return; }
+  closeManual(); showResult(r); setStatus("Match · manual", true);
+  frozen = true; video.pause(); scanBtn.textContent = "Back to live";
+});
+document.getElementById("sheetBg").addEventListener("click", closeManual);
+
 // ---------- UI ----------
 document.getElementById("start").addEventListener("click", async () => {
   gateMsg.textContent = "";
@@ -511,7 +573,10 @@ async function setMode(m) {
   document.getElementById("modeLabel").setAttribute("aria-pressed", m === "label");
   await applyMode();
 }
-scanBtn.addEventListener("click", () => { if (frozen && !busy) unfreeze(); else scan(); });
+scanBtn.addEventListener("click", () => {
+  if (busy) return;
+  if (frozen) unfreeze(); else scan(); // "Add photo" is a live-state scan that keeps labelText
+});
 document.getElementById("dbg").addEventListener("click", () => debugEl.classList.toggle("show"));
 </script>
 </body>
