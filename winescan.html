@@ -79,6 +79,8 @@
   }
   .btn:focus-visible, .seg button:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
   #spacer { flex: 1; }
+  .btn.scan { background: var(--fg); color: var(--badge-fg); font-weight: 600; padding: 11px 22px; min-width: 120px; }
+  .btn.scan:disabled { opacity: .6; }
 
   #debug {
     display: none; font: 11px/1.35 ui-monospace, Menlo, monospace; color: var(--muted);
@@ -130,7 +132,7 @@
 
 <div id="gate">
   <h1>Point the camera at a wine list or a label.</h1>
-  <p>Test build. Finca Sandoval is in the catalog. Text is read on your phone, nothing is uploaded.</p>
+  <p>Test build. Frame the list, tap Scan. Finca Sandoval is in the catalog. Text is read on your phone, nothing is uploaded.</p>
   <button id="start" class="btn primary">Start camera</button>
   <p id="gateMsg"></p>
 </div>
@@ -155,7 +157,7 @@
         <button id="modeLabel" aria-pressed="false">Label</button>
       </div>
       <div id="spacer"></div>
-      <button id="pause" class="btn">Pause</button>
+      <button id="scan" class="btn scan">Scan</button>
       <button id="dbg" class="btn" aria-label="Show raw text">Text</button>
     </div>
   </div>
@@ -286,11 +288,11 @@ const gateMsg = document.getElementById("gateMsg");
 const work = document.createElement("canvas");
 const wctx = work.getContext("2d", { willReadFrequently: true });
 
-let mode = "list", paused = false, worker = null, busy = false, raf = 0;
-const CROP = 0.12; // skip top/bottom band of the frame (covered by UI)
-let sticky = new Map(); // id -> {wine, box, until}
+let mode = "list", frozen = false, busy = false, worker = null, raf = 0;
+let results = [];      // [{r, box}] from the last scan
+let currentResult = null, badgeRects = [], sheetOpen = false;
 let lastResult = { until: 0 };
-let badgeRects = [], currentResult = null, sheetOpen = false, wasPaused = false;
+const CROP = 0.10;     // skip top/bottom band of the frame (covered by UI)
 
 function setStatus(t, live) { statusEl.textContent = t; statusEl.classList.toggle("live", !!live); }
 
@@ -300,6 +302,8 @@ async function initOCR() {
     logger: m => { if (m.status === "loading tesseract core" || m.status === "loading language traineddata") setStatus(`Loading ${Math.round((m.progress||0)*100)}%`); }
   });
   await applyMode();
+  setStatus("Ready. Frame the list and tap Scan.", true);
+  scanBtn.disabled = false;
 }
 async function applyMode() {
   if (!worker) return;
@@ -324,6 +328,7 @@ function sizeOverlay() {
   overlay.width = Math.round(overlay.clientWidth * dpr);
   overlay.height = Math.round(overlay.clientHeight * dpr);
   octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawOverlay();
 }
 window.addEventListener("resize", sizeOverlay);
 
@@ -333,135 +338,112 @@ function coverMap() {
   const cw = overlay.clientWidth, ch = overlay.clientHeight;
   const s = Math.max(cw / vw, ch / vh);
   const ox = (cw - vw * s) / 2, oy = (ch - vh * s) / 2;
-  const k = vw / work.width; // work canvas is downscaled
-  const cy = vh * CROP;      // and vertically cropped
+  const k = vw / work.width;
+  const cy = vh * CROP;
   return (x, y) => [ox + x * k * s, oy + (y * k + cy) * s];
 }
 
-async function tick() {
-  if (!paused && !busy && worker && video.videoWidth) {
-    busy = true;
-    try {
-      const target = 900;
-      const k = Math.min(1, target / video.videoWidth);
-      const bandTop = Math.round(video.videoHeight * CROP), bandH = Math.round(video.videoHeight * (1 - 2 * CROP));
-      work.width = Math.round(video.videoWidth * k);
-      work.height = Math.round(bandH * k);
-      wctx.drawImage(video, 0, bandTop, video.videoWidth, bandH, 0, 0, work.width, work.height);
-      // Light contrast boost helps printed lists under restaurant light.
-      wctx.filter = "contrast(1.25) grayscale(1)";
-      wctx.drawImage(work, 0, 0);
-      wctx.filter = "none";
+// ---------- Scan: freeze frame, read once, place badges ----------
+const scanBtn = document.getElementById("scan");
+async function scan() {
+  if (busy || !worker || !video.videoWidth) return;
+  busy = true; scanBtn.disabled = true; scanBtn.textContent = "Reading…";
+  results = []; badgeRects = []; resultEl.classList.remove("show");
+  try {
+    // Freeze: pausing the video keeps the last frame on screen.
+    const target = 1100;
+    const k = Math.min(1, target / video.videoWidth);
+    const bandTop = Math.round(video.videoHeight * CROP), bandH = Math.round(video.videoHeight * (1 - 2 * CROP));
+    work.width = Math.round(video.videoWidth * k);
+    work.height = Math.round(bandH * k);
+    wctx.drawImage(video, 0, bandTop, video.videoWidth, bandH, 0, 0, work.width, work.height);
+    video.pause(); frozen = true;
+    wctx.filter = "contrast(1.25) grayscale(1)"; wctx.drawImage(work, 0, 0); wctx.filter = "none";
 
-      const t0 = performance.now();
-      const { data } = await worker.recognize(work, {}, { text: true, blocks: true });
-      const ms = Math.round(performance.now() - t0);
-      const lines = [];
-      for (const b of data.blocks || []) for (const p of b.paragraphs || []) for (const l of p.lines || []) {
-        if (l.text && l.text.trim().length >= 3) lines.push({ text: l.text.trim(), bbox: l.bbox, conf: l.confidence });
+    const t0 = performance.now();
+    const { data } = await worker.recognize(work, {}, { text: true, blocks: true });
+    const ms = Math.round(performance.now() - t0);
+    const lines = [];
+    for (const b of data.blocks || []) for (const p of b.paragraphs || []) for (const l of p.lines || []) {
+      if (l.text && l.text.trim().length >= 3) lines.push({ text: l.text.trim(), bbox: l.bbox, conf: l.confidence });
+    }
+    debugEl.textContent = `${ms} ms\n` + lines.map(l => `${Math.round(l.conf)}  ${l.text}`).join("\n");
+
+    if (mode === "list") {
+      for (const l of lines) { const r = identify(l.text, false); if (r) results.push({ r, box: l.bbox }); }
+      // One badge per text row: merge entries whose rows overlap, keep the first.
+      results.sort((a, b) => a.box.y0 - b.box.y0);
+      results = results.filter((it, i) => {
+        if (!i) return true; const p = results[i - 1];
+        return Math.min(p.box.y1, it.box.y1) - Math.max(p.box.y0, it.box.y0) <= 0.5 * Math.min(p.box.y1 - p.box.y0, it.box.y1 - it.box.y0);
+      });
+      if (results.length) {
+        const mid = work.height / 2;
+        const c = [...results].sort((a, b) => Math.abs((a.box.y0 + a.box.y1) / 2 - mid) - Math.abs((b.box.y0 + b.box.y1) / 2 - mid))[0];
+        showResult(c.r);
       }
-      debugEl.textContent = `${ms} ms\n` + lines.map(l => `${Math.round(l.conf)}  ${l.text}`).join("\n");
-      handleLines(lines, data.text || "");
-      setStatus(mode === "list" ? `Scanning list · ${ms} ms` : `Scanning label · ${ms} ms`, true);
-    } catch (e) {
-      setStatus("Read failed: " + (e.message || e));
-    } finally { busy = false; }
+      setStatus(results.length ? `${results.length} wine${results.length > 1 ? "s" : ""} found · ${ms} ms` : `No match · ${ms} ms`, true);
+    } else {
+      const r = identify(data.text || "", false);
+      if (r) showResult(r);
+      setStatus(r ? `Match · ${ms} ms` : `No match · ${ms} ms`, true);
+    }
+  } catch (e) {
+    setStatus("Read failed: " + (e.message || e));
+  } finally {
+    busy = false; scanBtn.disabled = false; scanBtn.textContent = "Back to live";
+    drawOverlay();
   }
+}
+function unfreeze() {
+  frozen = false; results = []; badgeRects = []; currentResult = null;
+  resultEl.classList.remove("show"); video.play();
+  scanBtn.textContent = "Scan"; setStatus("Live. Tap Scan.", true);
   drawOverlay();
-  raf = requestAnimationFrame(tick);
 }
 
-function handleLines(lines, fullText) {
-  const now = performance.now();
-  if (mode === "list") {
-    // Per line, plus a two-line window so a wrapped name still matches.
-    // One badge per wine and vintage; the box follows the latest sighting.
-    for (const l of lines) {
-      const r = identify(l.text, false);
-      if (!r) continue;
-      // One badge per wine and row; the row band absorbs small camera drift.
-      const key = r.wine.name + "#" + Math.round(l.bbox.y0 / 40);
-      const prev = sticky.get(key);
-      sticky.set(key, { r, box: l.bbox, until: now + 3500, seen: (prev ? prev.seen : 0) + 1 });
-    }
-    const live = [...sticky.values()].filter(s => s.until > now && s.seen >= 2);
-    if (live.length) {
-      const mid = work.height / 2;
-      live.sort((a, b) => Math.abs((a.box.y0 + a.box.y1) / 2 - mid) - Math.abs((b.box.y0 + b.box.y1) / 2 - mid));
-      showResult(live[0].r, now + 3500);
-    }
-  } else {
-    const r = identify(fullText, false);
-    if (r) showResult(r, now + 3000);
-  }
-}
-
-function showResult(r, until) {
+function showResult(r) {
   currentResult = r;
   document.getElementById("rScore").textContent = r.score + "p";
   document.getElementById("rLatest").textContent = `(${r.latest})`;
   document.getElementById("rName").textContent = pathOf(r);
   document.getElementById("rNote").textContent = "";
   resultEl.classList.add("show");
-  lastResult.until = until;
 }
 
 function drawOverlay() {
-  const now = performance.now();
   const W = overlay.clientWidth, H = overlay.clientHeight;
   octx.clearRect(0, 0, W, H);
-  if (!paused && lastResult.until && lastResult.until < now) resultEl.classList.remove("show");
-  if (mode !== "list" || !video.videoWidth || !work.width) return;
-  const map = coverMap();
-
-  // Collect live entries, drop expired, one per text row (keep the newest when rows overlap).
-  const items = [];
-  for (const [key, s] of sticky) {
-    if (!paused && s.until < now) { sticky.delete(key); continue; }
-    if (s.seen < 2) continue;
-    const [x0, y0] = map(s.box.x0, s.box.y0), [x1, y1] = map(s.box.x1, s.box.y1);
-    items.push({ s, x0, y0, x1, y1 });
-  }
-  items.sort((a, b) => a.y0 - b.y0);
-  const rows = [];
-  for (const it of items) {
-    const prev = rows[rows.length - 1];
-    if (prev && Math.min(prev.y1, it.y1) - Math.max(prev.y0, it.y0) > 0.5 * Math.min(prev.y1 - prev.y0, it.y1 - it.y0)) {
-      if (it.s.until > prev.s.until) rows[rows.length - 1] = it; // newer sighting wins
-    } else rows.push(it);
-  }
-
-  // Lay out badges in a right column, pushed down so they never overlap.
-  const PAD = 8, GAP = 6, BW = Math.min(190, W * 0.5), BH = 46;
-  let lastBottom = -Infinity;
   badgeRects = [];
+  if (!frozen || mode !== "list" || !video.videoWidth || !work.width || !results.length) return;
+  const map = coverMap();
+  const rows = results.map(it => {
+    const [x0, y0] = map(it.box.x0, it.box.y0), [x1, y1] = map(it.box.x1, it.box.y1);
+    return { r: it.r, x0, y0, x1, y1 };
+  }).filter(it => it.y1 > 0 && it.y0 < H);
+
+  // Right column, pushed down so badges never overlap.
+  const PAD = 8, GAP = 6, BW = Math.min(200, W * 0.52), BH = 46;
+  let lastBottom = -Infinity;
   for (const it of rows) {
-    const r = it.s.r;
-    const alpha = paused ? 1 : Math.min(1, (it.s.until - now) / 400);
-    octx.globalAlpha = alpha;
+    const r = it.r;
     const bx = W - BW - PAD;
     let by = (it.y0 + it.y1) / 2 - BH / 2;
     if (by < lastBottom + GAP) by = lastBottom + GAP;
     lastBottom = by + BH;
     badgeRects.push({ x: bx, y: by, w: BW, h: BH, r });
 
-    // underline the matched row, and a short leader to the badge
     octx.strokeStyle = "rgba(246,239,232,.9)"; octx.lineWidth = 1.5;
     octx.beginPath(); octx.moveTo(it.x0, it.y1 + 3); octx.lineTo(Math.min(it.x1, bx - 6), it.y1 + 3); octx.stroke();
     octx.strokeStyle = "rgba(246,239,232,.5)";
     octx.beginPath(); octx.moveTo(Math.min(it.x1, bx - 6), it.y1 + 3); octx.lineTo(bx, by + BH / 2); octx.stroke();
 
-    octx.fillStyle = "#f6efe8";
-    roundRect(bx, by, BW, BH, 9); octx.fill();
-    const big = "Parker " + r.score + "p (" + r.latest + ")";
-    const small = `${r.producer.producer} · ${r.wine.name}`;
+    octx.fillStyle = "#f6efe8"; roundRect(bx, by, BW, BH, 9); octx.fill();
     octx.fillStyle = "#2a0f14"; octx.textBaseline = "alphabetic";
     octx.font = "700 18px Fraunces, Georgia, serif";
-    octx.fillText(fit(big, BW - 20), bx + 10, by + 20);
-    octx.fillStyle = "#5a3a40";
-    octx.font = "500 11.5px 'Inter Tight', system-ui, sans-serif";
-    octx.fillText(fit(small, BW - 20), bx + 10, by + 36);
-    octx.globalAlpha = 1;
+    octx.fillText(fit("Parker " + r.score + "p (" + r.latest + ")", BW - 20), bx + 10, by + 20);
+    octx.fillStyle = "#5a3a40"; octx.font = "500 11.5px 'Inter Tight', system-ui, sans-serif";
+    octx.fillText(fit(`${r.producer.producer} · ${r.wine.name}`, BW - 20), bx + 10, by + 36);
   }
 }
 function fit(text, maxW) {
@@ -486,7 +468,6 @@ function openSheet(r) {
   document.getElementById("sNotes").textContent = r.wine.notes || "";
   const vs = Object.keys(r.wine.scores).map(Number).sort((a, b) => b - a);
   document.getElementById("sVintages").innerHTML = vs.map(v => `<div class="vint"><span>${v}</span><b>Parker ${r.wine.scores[v]}p</b></div>`).join("");
-  wasPaused = paused; paused = true; video.pause();
   sheetOpen = true;
   document.getElementById("sheetBg").classList.add("show");
   document.getElementById("sheet").classList.add("show");
@@ -495,13 +476,13 @@ function closeSheet() {
   sheetOpen = false;
   document.getElementById("sheetBg").classList.remove("show");
   document.getElementById("sheet").classList.remove("show");
-  if (!wasPaused) { paused = false; video.play(); }
 }
 overlay.addEventListener("click", e => {
   const rect = overlay.getBoundingClientRect();
   const x = e.clientX - rect.left, y = e.clientY - rect.top;
   const hit = badgeRects.find(b => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h);
   if (hit) openSheet(hit.r);
+  else if (frozen && !busy) unfreeze(); // tap the frozen image to go back to live
 });
 resultEl.addEventListener("click", () => openSheet(currentResult));
 document.getElementById("sheetClose").addEventListener("click", closeSheet);
@@ -519,7 +500,7 @@ document.getElementById("start").addEventListener("click", async () => {
     await startCamera();
     gate.style.display = "none";
     sizeOverlay();
-    tick();
+    scanBtn.disabled = true;
     await initOCR();
   } catch (e) {
     gateMsg.className = "err";
@@ -529,15 +510,12 @@ document.getElementById("start").addEventListener("click", async () => {
 document.getElementById("modeList").addEventListener("click", () => setMode("list"));
 document.getElementById("modeLabel").addEventListener("click", () => setMode("label"));
 async function setMode(m) {
-  mode = m; sticky.clear(); resultEl.classList.remove("show");
+  mode = m; if (frozen) unfreeze();
   document.getElementById("modeList").setAttribute("aria-pressed", m === "list");
   document.getElementById("modeLabel").setAttribute("aria-pressed", m === "label");
   await applyMode();
 }
-document.getElementById("pause").addEventListener("click", e => {
-  paused = !paused; e.target.textContent = paused ? "Resume" : "Pause";
-  if (paused) { video.pause(); setStatus("Paused"); } else { video.play(); }
-});
+scanBtn.addEventListener("click", () => { if (frozen && !busy) unfreeze(); else scan(); });
 document.getElementById("dbg").addEventListener("click", () => debugEl.classList.toggle("show"));
 </script>
 </body>
