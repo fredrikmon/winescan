@@ -43,6 +43,8 @@
   }
   #brand { font-family: var(--font-score); font-weight: 700; font-size: 20px; letter-spacing: -0.01em; }
   #status { font-size: 12px; color: var(--muted); text-align: right; line-height: 1.25; max-width: 60%; }
+  .statusbtn { border: 0; background: transparent; font-family: inherit; padding: 4px 0; cursor: pointer; }
+  #status.switch { text-decoration: underline; text-underline-offset: 3px; }
   #status.live::before {
     content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
     background: var(--ok); margin-right: 6px; vertical-align: 1px;
@@ -79,7 +81,8 @@
   }
   .btn:focus-visible, .seg button:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
   #controls { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; }
-  #controls .seg { justify-self: start; }
+  #controls .modeinfo { justify-self: start; font-size: 13px; color: var(--muted); max-width: 120px; line-height: 1.25; }
+  #controls .modeinfo b { color: var(--fg); font-weight: 600; }
   #controls #dbg { justify-self: end; }
   .shutter { position: relative; width: 78px; height: 78px; border-radius: 50%; border: 0; background: transparent; padding: 0; cursor: pointer; justify-self: center; }
   .shutter .ring { position: absolute; inset: 0; border-radius: 50%; border: 4px solid var(--fg); }
@@ -171,7 +174,7 @@
 
 <div id="gate">
   <h1>Point the camera at a wine list or a label.</h1>
-  <p>Test build. Frame the list or label and tap the round button. Finca Sandoval is in the catalog. Text is read on your phone, nothing is uploaded.</p>
+  <p>Test build. Frame a wine list or a bottle and tap the round button. The app decides which it is. Text is read on your phone, nothing is uploaded.</p>
   <button id="start" class="btn primary">Start camera</button>
   <p id="gateMsg"></p>
 </div>
@@ -182,7 +185,7 @@
   <div id="banner" role="status"><div class="big" id="bannerBig"></div><div class="small" id="bannerSmall"></div></div>
   <div id="top">
     <div id="brand">WineScan</div>
-    <div id="status">Loading…</div>
+    <button id="status" class="statusbtn">Loading…</button>
   </div>
   <div id="bottom">
     <div id="debug"></div>
@@ -192,10 +195,7 @@
         <div class="note" id="rNote"></div></div>
     </div>
     <div id="controls">
-      <div class="seg" role="group" aria-label="Mode">
-        <button id="modeList" aria-pressed="true">List</button>
-        <button id="modeLabel" aria-pressed="false">Label</button>
-      </div>
+      <div id="modeInfo" class="modeinfo" aria-live="polite"></div>
       <button id="scan" class="shutter" aria-label="Scan" data-state="scan"><span class="ring"></span><span class="glyph"></span></button>
       <button id="dbg" class="btn" aria-label="Show raw text">Text</button>
     </div>
@@ -412,18 +412,9 @@ async function initOCR() {
   worker = await Tesseract.createWorker("eng", 1, {
     logger: m => { if (m.status === "loading tesseract core" || m.status === "loading language traineddata") setStatus(`Loading ${Math.round((m.progress||0)*100)}%`); }
   });
-  await applyMode();
   setStatus("Ready", true);
   shutter("scan");
 }
-async function applyMode() {
-  if (!worker) return;
-  await worker.setParameters({
-    tessedit_pageseg_mode: mode === "list" ? Tesseract.PSM.SINGLE_BLOCK : Tesseract.PSM.SPARSE_TEXT,
-    preserve_interword_spaces: "1",
-  });
-}
-
 async function startCamera() {
   const stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false
@@ -464,74 +455,112 @@ function banner(big, small) {
   document.getElementById("bannerSmall").innerHTML = (small || "").replace("[+]", "<b>+</b>");
   bannerEl.classList.add("show");
 }
+let lastScan = null; // {sparse: lines, text} from the last OCR pass, for mode override
+function setModeInfo(m, extra) {
+  document.getElementById("modeInfo").innerHTML = m ? `<b>${m === "list" ? "Wine list" : "Label"}</b><br>${extra || "tap status to switch"}` : "";
+}
+function toLines(data) {
+  const lines = [];
+  for (const b of data.blocks || []) for (const p of b.paragraphs || []) for (const l of p.lines || []) {
+    if (l.text && l.text.trim().length >= 3) lines.push({ text: l.text.trim(), bbox: l.bbox, conf: l.confidence });
+  }
+  return lines;
+}
+// List or label? Lists: many rows, left-aligned, many rows ending in a year or a price.
+function classify(lines) {
+  const n = lines.length;
+  if (n < 6) return { mode: "label", n, num: 0, aligned: 0 };
+  const num = lines.filter(l => /(19|20)\d\d|\b\d{1,2}[ .]?\d{3}\b|\b\d{3,4}\s*(kr|sek|€|:-)?\s*$/i.test(l.text)).length / n;
+  const xs = lines.map(l => l.bbox.x0).sort((a, b) => a - b), med = xs[Math.floor(n / 2)];
+  const aligned = lines.filter(l => Math.abs(l.bbox.x0 - med) < work.width * 0.08).length / n;
+  const list = (num >= 0.3 && aligned >= 0.4) || (aligned >= 0.7 && num >= 0.15) || (n >= 12 && aligned >= 0.6);
+  return { mode: list ? "list" : "label", n, num, aligned };
+}
+
 async function scan() {
   if (busy || !worker || !video.videoWidth) return;
-  busy = true; shutter("busy"); banner(null);
-  results = []; badgeRects = []; resultEl.classList.remove("show");
-  try {
-    // Freeze: pausing the video keeps the last frame on screen.
+  if (!frozen) {
     const target = 1100;
     const k = Math.min(1, target / video.videoWidth);
     const bandTop = Math.round(video.videoHeight * CROP), bandH = Math.round(video.videoHeight * (1 - 2 * CROP));
     work.width = Math.round(video.videoWidth * k);
     work.height = Math.round(bandH * k);
     wctx.drawImage(video, 0, bandTop, video.videoWidth, bandH, 0, 0, work.width, work.height);
-    video.pause(); frozen = true;
     wctx.filter = "contrast(1.25) grayscale(1)"; wctx.drawImage(work, 0, 0); wctx.filter = "none";
+  }
+  video.pause(); frozen = true;
+  await analyze(null);
+}
 
+async function analyze(forceMode) {
+  busy = true; shutter("busy"); banner(null);
+  results = []; badgeRects = []; resultEl.classList.remove("show");
+  try {
     const t0 = performance.now();
-    const { data } = await worker.recognize(work, {}, { text: true, blocks: true });
-    const ms = Math.round(performance.now() - t0);
-    const lines = [];
-    for (const b of data.blocks || []) for (const p of b.paragraphs || []) for (const l of p.lines || []) {
-      if (l.text && l.text.trim().length >= 3) lines.push({ text: l.text.trim(), bbox: l.bbox, conf: l.confidence });
+    await worker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT, preserve_interword_spaces: "1" });
+    const sparse = await worker.recognize(work, {}, { text: true, blocks: true });
+    let lines = toLines(sparse.data), text = sparse.data.text || "";
+    const c = classify(lines);
+    mode = forceMode || c.mode;
+    if (mode === "list") {
+      await worker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.SINGLE_BLOCK, preserve_interword_spaces: "1" });
+      const block = await worker.recognize(work, {}, { text: true, blocks: true });
+      const bl = toLines(block.data);
+      if (bl.length) { lines = bl; text = block.data.text || ""; }
     }
-    debugEl.textContent = `${ms} ms\n` + lines.map(l => `${Math.round(l.conf)}  ${l.text}`).join("\n");
+    const ms = Math.round(performance.now() - t0);
+    lastScan = { lines, text };
+    debugEl.textContent = `${ms} ms · ${mode}${forceMode ? " (forced)" : ""} · n=${c.n} num=${c.num.toFixed(2)} aligned=${c.aligned.toFixed(2)}\n` + lines.map(l => `${Math.round(l.conf)}  ${l.text}`).join("\n");
+    statusEl.classList.add("switch");
 
     if (mode === "list") {
-      for (const l of lines) { const r = identify(l.text, false); if (r) results.push({ r, box: l.bbox }); }
-      // One badge per text row: merge entries whose rows overlap, keep the first.
+      labelText = [];
+      for (const l of lines) { const r = identify(l.text, false); if (r && !r.ambiguous) results.push({ r, box: l.bbox }); }
       results.sort((a, b) => a.box.y0 - b.box.y0);
       results = results.filter((it, i) => {
         if (!i) return true; const p = results[i - 1];
         return Math.min(p.box.y1, it.box.y1) - Math.max(p.box.y0, it.box.y0) <= 0.5 * Math.min(p.box.y1 - p.box.y0, it.box.y1 - it.box.y0);
       });
-      currentResult = results.length ? results[0].r : null; // card is only used in label mode
-      setStatus(results.length ? `${results.length} wine${results.length > 1 ? "s" : ""} found · ${ms} ms` : `No match · ${ms} ms`, true);
+      currentResult = results.length ? results[0].r : null;
+      setModeInfo("list", `${results.length} found`);
+      setStatus(results.length ? `List · ${results.length} wine${results.length > 1 ? "s" : ""} · ${ms} ms` : `List · no match · ${ms} ms`, true);
       if (!results.length) banner("No wines found", "Tap ↺, move closer or find better light");
+      shutter("live");
     } else {
-      labelText.push(data.text || "");
+      if (!forceMode || !labelText.length) labelText.push(text); else labelText[labelText.length - 1] = text;
       const r = identify(labelText, false, { list: false });
+      setModeInfo("label", labelText.length > 1 ? `${labelText.length} photos` : "");
       if (r && r.ambiguous) {
-        setStatus("Producer found. Which wine?", true);
-        shutter("live"); frozen = true; video.pause();
+        setStatus("Label · producer found", true);
+        shutter("live");
         openChooser(r);
       } else if (r) {
         showResult(r);
-        setStatus(`Match · ${ms} ms`, true);
+        setStatus(`Label · match · ${ms} ms`, true);
         shutter("live");
       } else if (labelText.length < 2) {
-        setStatus("No match", true);
+        setStatus("Label · no match", true);
         banner("No match", "Add a photo of the back label, then tap [+]");
         shutter("add");
         video.play(); frozen = false; // back to live so the next photo can be framed
       } else {
-        setStatus("No match after 2 photos", true);
+        setStatus("Label · no match after 2 photos", true);
         shutter("live");
         openManual();
       }
     }
   } catch (e) {
     setStatus("Read failed: " + (e.message || e));
+    shutter("live");
   } finally {
     busy = false;
-    if (mode === "list") shutter("live");
     drawOverlay();
   }
 }
 function unfreeze() {
   frozen = false; results = []; badgeRects = []; currentResult = null; labelText = [];
   resultEl.classList.remove("show"); video.play(); banner(null);
+  lastScan = null; statusEl.classList.remove("switch"); setModeInfo(null);
   shutter("scan"); setStatus("Live", true);
   drawOverlay();
 }
@@ -683,14 +712,8 @@ document.getElementById("start").addEventListener("click", async () => {
     gateMsg.textContent = "Could not start: " + (e.message || e) + ". Check camera permission for this site in Settings > Safari.";
   }
 });
-document.getElementById("modeList").addEventListener("click", () => setMode("list"));
-document.getElementById("modeLabel").addEventListener("click", () => setMode("label"));
-async function setMode(m) {
-  mode = m; if (frozen) unfreeze();
-  document.getElementById("modeList").setAttribute("aria-pressed", m === "list");
-  document.getElementById("modeLabel").setAttribute("aria-pressed", m === "label");
-  await applyMode();
-}
+// Tap the status line to override the auto-detected mode and re-analyze the same frame.
+statusEl.addEventListener("click", () => { if (frozen && !busy && lastScan) analyze(mode === "list" ? "label" : "list"); });
 scanBtn.addEventListener("click", () => {
   if (busy) return;
   if (frozen) unfreeze(); else scan(); // "Add photo" is a live-state scan that keeps labelText
