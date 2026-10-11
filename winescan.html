@@ -469,11 +469,14 @@ function toLines(data) {
 // List or label? Lists: many rows, left-aligned, many rows ending in a year or a price.
 function classify(lines) {
   const n = lines.length;
+  const tokens = norm(lines.map(l => l.text).join(" ")).split(" ").filter(Boolean);
+  if (looksLikeBack(tokens)) return { mode: "label", n, num: 0, aligned: 0, back: true };
   if (n < 6) return { mode: "label", n, num: 0, aligned: 0 };
-  const num = lines.filter(l => /(19|20)\d\d|\b\d{1,2}[ .]?\d{3}\b|\b\d{3,4}\s*(kr|sek|€|:-)?\s*$/i.test(l.text)).length / n;
+  // Rows that end in a year or a price, the signature of a wine list.
+  const num = lines.filter(l => /\b(19|20)\d\d\b/.test(l.text) || /(\d{1,2}[ .]\d{3}|\d{3,4})\s*(kr|sek|€|:-|,-)?\s*$/i.test(l.text)).length / n;
   const xs = lines.map(l => l.bbox.x0).sort((a, b) => a - b), med = xs[Math.floor(n / 2)];
   const aligned = lines.filter(l => Math.abs(l.bbox.x0 - med) < work.width * 0.08).length / n;
-  const list = (num >= 0.3 && aligned >= 0.4) || (aligned >= 0.7 && num >= 0.15) || (n >= 12 && aligned >= 0.6);
+  const list = num >= 0.25 && aligned >= 0.4;
   return { mode: list ? "list" : "label", n, num, aligned };
 }
 
@@ -510,7 +513,7 @@ async function analyze(forceMode) {
     }
     const ms = Math.round(performance.now() - t0);
     lastScan = { lines, text };
-    debugEl.textContent = `${ms} ms · ${mode}${forceMode ? " (forced)" : ""} · n=${c.n} num=${c.num.toFixed(2)} aligned=${c.aligned.toFixed(2)}\n` + lines.map(l => `${Math.round(l.conf)}  ${l.text}`).join("\n");
+    debugEl.textContent = `${ms} ms · ${mode}${forceMode ? " (forced)" : ""}${c.back ? " (back label)" : ""} · n=${c.n} num=${c.num.toFixed(2)} aligned=${c.aligned.toFixed(2)}\n` + lines.map(l => `${Math.round(l.conf)}  ${l.text}`).join("\n");
     statusEl.classList.add("switch");
 
     if (mode === "list") {
