@@ -199,7 +199,9 @@ function keyHit(tokens, glued, word) {
 // OCR often misreads 0/O, 1/l, 5/S in years. Normalize before matching.
 function findVintage(tokens) {
   for (const t of tokens) {
-    const fixed = t.replace(/o/g, "0").replace(/[il|]/g, "1").replace(/s/g, "5").replace(/z/g, "2").replace(/b/g, "8");
+    if (t.length < 4 || t.length > 5) continue;
+    const fixed = t.replace(/[oq]/g, "0").replace(/[il|t]/g, "1").replace(/z/g, "2").replace(/e/g, "3").replace(/a/g, "4")
+      .replace(/s/g, "5").replace(/b/g, "8").replace(/g/g, "9").slice(0, 4);
     if (/^(19|20)\d\d$/.test(fixed)) { const y = +fixed; if (y >= 1990 && y <= 2030) return y; }
   }
   return null;
@@ -242,6 +244,7 @@ const work = document.createElement("canvas");
 const wctx = work.getContext("2d", { willReadFrequently: true });
 
 let mode = "list", paused = false, worker = null, busy = false, raf = 0;
+const CROP = 0.12; // skip top/bottom band of the frame (covered by UI)
 let sticky = new Map(); // id -> {wine, box, until}
 let lastResult = { until: 0 };
 
@@ -287,18 +290,20 @@ function coverMap() {
   const s = Math.max(cw / vw, ch / vh);
   const ox = (cw - vw * s) / 2, oy = (ch - vh * s) / 2;
   const k = vw / work.width; // work canvas is downscaled
-  return (x, y) => [ox + x * k * s, oy + y * k * s];
+  const cy = vh * CROP;      // and vertically cropped
+  return (x, y) => [ox + x * k * s, oy + (y * k + cy) * s];
 }
 
 async function tick() {
   if (!paused && !busy && worker && video.videoWidth) {
     busy = true;
     try {
-      const target = 1000;
+      const target = 800;
       const k = Math.min(1, target / video.videoWidth);
+      const bandTop = Math.round(video.videoHeight * CROP), bandH = Math.round(video.videoHeight * (1 - 2 * CROP));
       work.width = Math.round(video.videoWidth * k);
-      work.height = Math.round(video.videoHeight * k);
-      wctx.drawImage(video, 0, 0, work.width, work.height);
+      work.height = Math.round(bandH * k);
+      wctx.drawImage(video, 0, bandTop, video.videoWidth, bandH, 0, 0, work.width, work.height);
       // Light contrast boost helps printed lists under restaurant light.
       wctx.filter = "contrast(1.25) grayscale(1)";
       wctx.drawImage(work, 0, 0);
@@ -334,10 +339,14 @@ function handleLines(lines, fullText) {
         r = identify(l.text + " " + nx.text, true);
         if (r) box = findVintage(norm(nx.text).split(" ")) ? nx.bbox : l.bbox;
       }
-      if (r) sticky.set(r.wine.name + "#" + r.vintage, { r, box, until: now + 1500 });
+      if (r) sticky.set(r.wine.name + "#" + r.vintage, { r, box, until: now + 3500 });
     }
     const live = [...sticky.values()].filter(s => s.until > now);
-    if (live.length) showResult(live.sort((a, b) => a.box.y0 - b.box.y0)[0].r, now + 2500);
+    if (live.length) {
+      const mid = work.height / 2;
+      live.sort((a, b) => Math.abs((a.box.y0 + a.box.y1) / 2 - mid) - Math.abs((b.box.y0 + b.box.y1) / 2 - mid));
+      showResult(live[0].r, now + 3500);
+    }
   } else {
     const r = identify(fullText, false);
     if (r) showResult(r, now + 3000);
@@ -357,31 +366,63 @@ function showResult(r, until) {
 
 function drawOverlay() {
   const now = performance.now();
-  octx.clearRect(0, 0, overlay.clientWidth, overlay.clientHeight);
+  const W = overlay.clientWidth, H = overlay.clientHeight;
+  octx.clearRect(0, 0, W, H);
   if (!paused && lastResult.until && lastResult.until < now) resultEl.classList.remove("show");
   if (mode !== "list" || !video.videoWidth || !work.width) return;
   const map = coverMap();
+
+  // Collect live entries, drop expired, one per text row (keep the newest when rows overlap).
+  const items = [];
   for (const [key, s] of sticky) {
     if (!paused && s.until < now) { sticky.delete(key); continue; }
-    const [x0, y0] = map(s.box.x0, s.box.y0);
-    const [x1, y1] = map(s.box.x1, s.box.y1);
-    const alpha = paused ? 1 : Math.min(1, (s.until - now) / 400);
+    const [x0, y0] = map(s.box.x0, s.box.y0), [x1, y1] = map(s.box.x1, s.box.y1);
+    items.push({ s, x0, y0, x1, y1 });
+  }
+  items.sort((a, b) => a.y0 - b.y0);
+  const rows = [];
+  for (const it of items) {
+    const prev = rows[rows.length - 1];
+    if (prev && Math.min(prev.y1, it.y1) - Math.max(prev.y0, it.y0) > 0.5 * Math.min(prev.y1 - prev.y0, it.y1 - it.y0)) {
+      if (it.s.until > prev.s.until) rows[rows.length - 1] = it; // newer sighting wins
+    } else rows.push(it);
+  }
+
+  // Lay out badges in a right column, pushed down so they never overlap.
+  const PAD = 10, GAP = 6, BW = Math.min(230, W * 0.62), BH = 48;
+  let lastBottom = -Infinity;
+  for (const it of rows) {
+    const r = it.s.r;
+    const alpha = paused ? 1 : Math.min(1, (it.s.until - now) / 400);
     octx.globalAlpha = alpha;
-    // underline the matched line
+    const bx = W - BW - PAD;
+    let by = (it.y0 + it.y1) / 2 - BH / 2;
+    if (by < lastBottom + GAP) by = lastBottom + GAP;
+    lastBottom = by + BH;
+
+    // underline the matched row, and a short leader to the badge
     octx.strokeStyle = "rgba(246,239,232,.9)"; octx.lineWidth = 1.5;
-    octx.beginPath(); octx.moveTo(x0, y1 + 3); octx.lineTo(x1, y1 + 3); octx.stroke();
-    // score badge at the right end of the line
-    const label = s.r.scanned ? "Parker " + s.r.scanned + "p" : "Parker " + s.r.score + "p (" + s.r.latest + ")";
-    octx.font = "700 17px Fraunces, Georgia, serif";
-    const tw = octx.measureText(label).width;
-    const bw = tw + 18, bh = 28;
-    let bx = Math.min(x1 + 10, overlay.clientWidth - bw - 10), by = (y0 + y1) / 2 - bh / 2;
+    octx.beginPath(); octx.moveTo(it.x0, it.y1 + 3); octx.lineTo(Math.min(it.x1, bx - 6), it.y1 + 3); octx.stroke();
+    octx.strokeStyle = "rgba(246,239,232,.5)";
+    octx.beginPath(); octx.moveTo(Math.min(it.x1, bx - 6), it.y1 + 3); octx.lineTo(bx, by + BH / 2); octx.stroke();
+
     octx.fillStyle = "#f6efe8";
-    roundRect(bx, by, bw, bh, 8); octx.fill();
-    octx.fillStyle = "#2a0f14";
-    octx.textBaseline = "middle"; octx.fillText(label, bx + 9, by + bh / 2 + 1);
+    roundRect(bx, by, BW, BH, 9); octx.fill();
+    const big = r.scanned ? "Parker " + r.scanned + "p" : "Not rated · latest " + r.score + "p (" + r.latest + ")";
+    const small = `${r.producer.producer} · ${r.wine.name}${r.vintage ? " · " + r.vintage : ""}`;
+    octx.fillStyle = "#2a0f14"; octx.textBaseline = "alphabetic";
+    octx.font = (r.scanned ? "700 18px" : "700 13px") + " Fraunces, Georgia, serif";
+    octx.fillText(fit(big, BW - 20), bx + 10, by + 21);
+    octx.fillStyle = "#5a3a40";
+    octx.font = "500 11.5px 'Inter Tight', system-ui, sans-serif";
+    octx.fillText(fit(small, BW - 20), bx + 10, by + 38);
     octx.globalAlpha = 1;
   }
+}
+function fit(text, maxW) {
+  if (octx.measureText(text).width <= maxW) return text;
+  while (text.length > 3 && octx.measureText(text + "…").width > maxW) text = text.slice(0, -1);
+  return text + "…";
 }
 function roundRect(x, y, w, h, r) {
   octx.beginPath(); octx.moveTo(x + r, y); octx.arcTo(x + w, y, x + w, y + h, r); octx.arcTo(x + w, y + h, x, y + h, r);
