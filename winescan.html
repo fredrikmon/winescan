@@ -97,6 +97,29 @@
   #gate .btn.primary { background: var(--fg); color: var(--badge-fg); font-size: 17px; padding: 14px 20px; align-self: flex-start; }
   #gate .err { color: #ff9f9f; }
 
+  #sheetBg { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; z-index: 20; }
+  #sheetBg.show { display: block; }
+  #sheet {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 21;
+    background: var(--badge); color: var(--badge-fg);
+    border-radius: 20px 20px 0 0; padding: 10px 20px calc(env(safe-area-inset-bottom, 0px) + 22px);
+    transform: translateY(105%); transition: transform .24s ease-out; max-height: 78%; overflow: auto;
+  }
+  #sheet.show { transform: none; }
+  #sheet .grab { width: 40px; height: 4px; border-radius: 2px; background: #c9b8b0; margin: 0 auto 14px; }
+  #sheet .path { font-size: 13px; color: #5a3a40; }
+  #sheet h2 { font-family: var(--font-score); font-weight: 700; font-size: 28px; margin: 4px 0 0; line-height: 1.1; }
+  #sheet .hero { font-family: var(--font-score); font-weight: 700; font-size: 40px; line-height: 1; margin: 10px 0 2px; }
+  #sheet .hero small { font-family: var(--font-ui); font-weight: 500; font-size: 14px; color: #5a3a40; margin-left: 8px; }
+  #sheet .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 14px; margin: 14px 0; }
+  #sheet .kv dt { color: #5a3a40; } #sheet .kv dd { margin: 0; font-weight: 500; }
+  #sheet p { font-size: 15px; line-height: 1.45; margin: 0 0 14px; }
+  #sheet h3 { font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: #5a3a40; margin: 16px 0 6px; font-weight: 600; }
+  #sheet .vint { display: flex; justify-content: space-between; padding: 7px 0; border-top: 1px solid #e6dcd3; font-size: 15px; }
+  #sheet .vint b { font-family: var(--font-score); font-size: 17px; }
+  #sheet .close { position: absolute; right: 14px; top: 12px; border: 0; background: #e6dcd3; color: #2a0f14; width: 32px; height: 32px; border-radius: 50%; font-size: 18px; cursor: pointer; }
+  #overlay { pointer-events: auto; }
+  #result { cursor: pointer; }
   @media (prefers-reduced-motion: no-preference) {
     #result.show { animation: pop .18s ease-out; }
     @keyframes pop { from { transform: translateY(6px); opacity: .6; } to { transform: none; opacity: 1; } }
@@ -138,6 +161,19 @@
   </div>
 </div>
 
+<div id="sheetBg"></div>
+<div id="sheet" role="dialog" aria-modal="true">
+  <div class="grab"></div>
+  <button class="close" id="sheetClose" aria-label="Close">×</button>
+  <div class="path" id="sPath"></div>
+  <h2 id="sName"></h2>
+  <div class="hero">Parker <span id="sScore"></span><small id="sLatest"></small></div>
+  <dl class="kv"><dt>Grapes</dt><dd id="sGrapes"></dd><dt>Style</dt><dd id="sStyle"></dd></dl>
+  <p id="sNotes"></p>
+  <h3>Rated vintages</h3>
+  <div id="sVintages"></div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js"></script>
 <script>
 // ---------- Catalog. Add producers and wines here; matching is data driven. ----------
@@ -149,10 +185,18 @@ const CATALOG = [
     keys: ["sandoval", "fincasandoval"],
     hints: ["ledana", "casablanca", "suelocalcareo", "vinosconalma", "manchuela"],
     wines: [
-      { name: "Finca Sandoval", keys: [], scores: { 2023: "95", 2022: "95" } },
-      { name: "Salia",          keys: ["salia"],           scores: { 2024: "94",  2022: "93+" } },
-      { name: "Fundamentalista",keys: ["fundamentalista"], scores: { 2024: "92+", 2023: "93", 2022: "92+" } },
-      { name: "Aurora",         keys: ["aurora"],          scores: { 2024: "93+", 2023: "94" } },
+      { name: "Finca Sandoval", keys: [], scores: { 2023: "95", 2022: "95" },
+        grapes: "Syrah, Bobal", style: "Red · full bodied",
+        notes: "The flagship. Old vines on limestone at 900 m. Dense dark fruit, fine tannin, long finish. Built to age ten years or more." },
+      { name: "Salia", keys: ["salia"], scores: { 2024: "94", 2022: "93+" },
+        grapes: "Syrah, Garnacha Tintorera, Bobal", style: "Red · medium bodied",
+        notes: "The approachable red. Bright red fruit, pepper, fresh acidity. Drinks well young with grilled meat or charcuterie." },
+      { name: "Fundamentalista", keys: ["fundamentalista"], scores: { 2024: "92+", 2023: "93", 2022: "92+" },
+        grapes: "Bobal", style: "Red · mineral",
+        notes: "Pure Bobal from old vines. Taut, savory, a little wild. Needs air or a few years. Lamb, game, aged cheese." },
+      { name: "Aurora", keys: ["aurora"], scores: { 2024: "93+", 2023: "94" },
+        grapes: "White blend", style: "White · textured",
+        notes: "The white. Stone fruit, chalk, saline length. Serve cool but not cold. Fish, rice dishes, soft cheese." },
     ],
   },
 ];
@@ -246,6 +290,7 @@ let mode = "list", paused = false, worker = null, busy = false, raf = 0;
 const CROP = 0.12; // skip top/bottom band of the frame (covered by UI)
 let sticky = new Map(); // id -> {wine, box, until}
 let lastResult = { until: 0 };
+let badgeRects = [], currentResult = null, sheetOpen = false, wasPaused = false;
 
 function setStatus(t, live) { statusEl.textContent = t; statusEl.classList.toggle("live", !!live); }
 
@@ -352,6 +397,7 @@ function handleLines(lines, fullText) {
 }
 
 function showResult(r, until) {
+  currentResult = r;
   document.getElementById("rScore").textContent = r.score + "p";
   document.getElementById("rLatest").textContent = `(${r.latest})`;
   document.getElementById("rName").textContent = pathOf(r);
@@ -388,6 +434,7 @@ function drawOverlay() {
   // Lay out badges in a right column, pushed down so they never overlap.
   const PAD = 8, GAP = 6, BW = Math.min(190, W * 0.5), BH = 46;
   let lastBottom = -Infinity;
+  badgeRects = [];
   for (const it of rows) {
     const r = it.s.r;
     const alpha = paused ? 1 : Math.min(1, (it.s.until - now) / 400);
@@ -396,6 +443,7 @@ function drawOverlay() {
     let by = (it.y0 + it.y1) / 2 - BH / 2;
     if (by < lastBottom + GAP) by = lastBottom + GAP;
     lastBottom = by + BH;
+    badgeRects.push({ x: bx, y: by, w: BW, h: BH, r });
 
     // underline the matched row, and a short leader to the badge
     octx.strokeStyle = "rgba(246,239,232,.9)"; octx.lineWidth = 1.5;
@@ -425,6 +473,43 @@ function roundRect(x, y, w, h, r) {
   octx.beginPath(); octx.moveTo(x + r, y); octx.arcTo(x + w, y, x + w, y + h, r); octx.arcTo(x + w, y + h, x, y + h, r);
   octx.arcTo(x, y + h, x, y, r); octx.arcTo(x, y, x + w, y, r); octx.closePath();
 }
+
+// ---------- Detail sheet ----------
+function openSheet(r) {
+  if (!r) return;
+  document.getElementById("sPath").textContent = `${r.producer.country} > ${r.producer.region} > ${r.producer.producer}`;
+  document.getElementById("sName").textContent = r.wine.name;
+  document.getElementById("sScore").textContent = r.score + "p";
+  document.getElementById("sLatest").textContent = `${r.latest} vintage`;
+  document.getElementById("sGrapes").textContent = r.wine.grapes || "–";
+  document.getElementById("sStyle").textContent = r.wine.style || "–";
+  document.getElementById("sNotes").textContent = r.wine.notes || "";
+  const vs = Object.keys(r.wine.scores).map(Number).sort((a, b) => b - a);
+  document.getElementById("sVintages").innerHTML = vs.map(v => `<div class="vint"><span>${v}</span><b>Parker ${r.wine.scores[v]}p</b></div>`).join("");
+  wasPaused = paused; paused = true; video.pause();
+  sheetOpen = true;
+  document.getElementById("sheetBg").classList.add("show");
+  document.getElementById("sheet").classList.add("show");
+}
+function closeSheet() {
+  sheetOpen = false;
+  document.getElementById("sheetBg").classList.remove("show");
+  document.getElementById("sheet").classList.remove("show");
+  if (!wasPaused) { paused = false; video.play(); }
+}
+overlay.addEventListener("click", e => {
+  const rect = overlay.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  const hit = badgeRects.find(b => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h);
+  if (hit) openSheet(hit.r);
+});
+resultEl.addEventListener("click", () => openSheet(currentResult));
+document.getElementById("sheetClose").addEventListener("click", closeSheet);
+document.getElementById("sheetBg").addEventListener("click", closeSheet);
+// swipe down to close
+let touchY = null;
+document.getElementById("sheet").addEventListener("touchstart", e => { touchY = e.touches[0].clientY; }, { passive: true });
+document.getElementById("sheet").addEventListener("touchend", e => { if (touchY !== null && e.changedTouches[0].clientY - touchY > 70 && document.getElementById("sheet").scrollTop === 0) closeSheet(); touchY = null; }, { passive: true });
 
 // ---------- UI ----------
 document.getElementById("start").addEventListener("click", async () => {
