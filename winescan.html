@@ -93,10 +93,11 @@
   .shutter[data-state="busy"] .ring { border-top-color: transparent; animation: spin .9s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   #banner { position: absolute; left: 20px; right: 20px; top: 42%; transform: translateY(-50%); text-align: center; pointer-events: none; display: none;
-    background: rgba(14,10,11,.78); border-radius: 18px; padding: 18px 16px; backdrop-filter: blur(6px); }
+    background: rgba(14,10,11,.82); border-radius: 22px; padding: 26px 20px; backdrop-filter: blur(6px); }
   #banner.show { display: block; }
-  #banner .big { font-family: var(--font-score); font-weight: 700; font-size: 30px; line-height: 1.05; }
-  #banner .small { font-size: 15px; color: var(--muted); margin-top: 6px; }
+  #banner .big { font-family: var(--font-score); font-weight: 700; font-size: 40px; line-height: 1.05; }
+  #banner .small { font-size: 22px; font-weight: 500; color: var(--fg); margin-top: 10px; line-height: 1.25; }
+  #banner .small b { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--fg); color: var(--badge-fg); font: 700 24px/1 var(--font-ui); vertical-align: -6px; margin: 0 2px; }
 
   #debug {
     display: none; font: 11px/1.35 ui-monospace, Menlo, monospace; color: var(--muted);
@@ -150,7 +151,7 @@
   #chooser .chip { display: flex; justify-content: space-between; align-items: baseline; width: 100%; text-align: left;
     border: 1px solid #c9b8b0; background: #fff; color: var(--badge-fg); border-radius: 12px; padding: 12px 14px; margin-bottom: 8px; font: 500 16px var(--font-ui); cursor: pointer; }
   #chooser .chip b { font-family: var(--font-score); font-size: 17px; }
-  #chooser .actions { margin-top: 8px; } #chooser .btn.ghost { background: #e6dcd3; color: var(--badge-fg); }
+  #chooser .actions { margin-top: 8px; display: flex; gap: 8px; } #chooser #cAdd { flex: 1; } #chooser .btn.ghost { background: #e6dcd3; color: var(--badge-fg); }
   #manual h2 { font-family: var(--font-score); font-weight: 700; font-size: 24px; margin: 0 0 4px; }
   #manual p { font-size: 14px; color: #5a3a40; margin: 0 0 12px; }
   #manual label { display: block; font-size: 12px; color: #5a3a40; margin: 10px 0 4px; letter-spacing: .06em; text-transform: uppercase; }
@@ -218,7 +219,7 @@
   <h2 id="cTitle"></h2>
   <p>The label shows the producer but not which wine. Tap the right one.</p>
   <div id="cChips"></div>
-  <div class="actions"><button class="btn ghost" id="cCancel">Cancel</button></div>
+  <div class="actions"><button class="btn ghost" id="cCancel">Cancel</button><button class="btn ghost" id="cAdd">Add a photo of the front</button></div>
 </div>
 <div id="manual" role="dialog" aria-modal="true">
   <h2>Which producer?</h2>
@@ -307,17 +308,22 @@ function keyHit(tokens, glued, word) {
 // Labels stack names across lines ("SA / LIA", "FUN / DA / MEN / TA / LISTA") and OCR may return the
 // lines in any order. A key is hit if it can be assembled from short tokens present in the text.
 function fragmentHit(tokens, word) {
-  const set = new Set(tokens.filter(t => t.length >= 2 && t.length <= 6 && word.includes(t)));
-  if (!set.size) return false;
-  const n = word.length, memo = new Array(n + 1).fill(null);
-  const ok = i => {
-    if (i === n) return true;
-    if (memo[i] !== null) return memo[i];
-    let res = false;
-    for (let len = 2; len <= 6 && i + len <= n && !res; len++) if (set.has(word.slice(i, i + len))) res = ok(i + len);
-    return memo[i] = res;
-  };
-  return ok(0) && [...set].some(t => t.length >= 3);
+  // Pieces: tokens that are substrings of the key (2..8 chars). Greedy left-to-right cover of the key,
+  // allowing gaps. Hit when covered >= 75%, at least two pieces, and one piece of 3+ chars.
+  const pieces = [...new Set(tokens.filter(t => t.length >= 2 && t.length <= 8 && word.includes(t)))];
+  if (pieces.length < 2) return false;
+  pieces.sort((a, b) => b.length - a.length);
+  const used = new Array(word.length).fill(false);
+  let covered = 0, count = 0, longest = 0;
+  for (const pc of pieces) {
+    let idx = word.indexOf(pc);
+    while (idx !== -1) {
+      let free = true; for (let i = idx; i < idx + pc.length; i++) if (used[i]) { free = false; break; }
+      if (free) { for (let i = idx; i < idx + pc.length; i++) used[i] = true; covered += pc.length; count++; longest = Math.max(longest, pc.length); break; }
+      idx = word.indexOf(pc, idx + 1);
+    }
+  }
+  return count >= 2 && longest >= 3 && covered / word.length >= 0.75;
 }
 // OCR often misreads 0/O, 1/l, 5/S in years. Normalize before matching.
 function findVintage(tokens) {
@@ -333,12 +339,20 @@ function latestVintage(w) { return Math.max(...Object.keys(w.scores).map(Number)
 // identify(texts, opts): texts is one string (a list row) or an array of photo texts (label, front first).
 // Returns {producer, wine, ...}, or {producer, ambiguous: true, candidates} when the producer is known
 // but the wine is not, or null.
+const BACK_MARKERS = ["sulfitos", "sulfites", "sulfites", "contiene", "contient", "contains", "embotellado", "bottled", "producto", "produce", "alcvol", "alc", "vol", "75cl", "750ml", "ecologico", "lote", "importado", "importer", "imported"];
+function looksLikeBack(tokens) {
+  const glued = tokens.join("");
+  let n = 0; for (const m of BACK_MARKERS) if (tokens.includes(m) || (m.length >= 6 && glued.includes(m))) n++;
+  return n >= 2;
+}
 function identify(texts, strict, opts = {}) {
   const arr = Array.isArray(texts) ? texts : [texts];
   const all = norm(arr.join(" ")).split(" ").filter(Boolean), glued = all.join("");
-  const first = norm(arr[0] || "").split(" ").filter(Boolean), gluedFirst = first.join("");
   const vintage = findVintage(all);
   const listMode = opts.list !== false; // single string = list row unless told otherwise
+  // Front photos: everything that does not read like a back label. Only these can name the base wine.
+  const fronts = listMode ? arr : arr.filter(t => !looksLikeBack(norm(t).split(" ").filter(Boolean)));
+  const frontTok = norm(fronts.join(" ")).split(" ").filter(Boolean), gluedFront = frontTok.join("");
   let best = null;
   for (const p of CATALOG) {
     const byKey = p.keys.some(k => keyHit(all, glued, k));
@@ -348,7 +362,7 @@ function identify(texts, strict, opts = {}) {
     const baseWine = p.wines.find(w => w.base);
     if (!wine && baseWine) {
       if (listMode) wine = baseWine; // "Finca Sandoval" on a list means the flagship
-      else if (baseWine.keys.some(k => keyHit(first, gluedFirst, k))) wine = baseWine; // front label says it
+      else if (frontTok.length && baseWine.keys.some(k => keyHit(frontTok, gluedFront, k))) wine = baseWine;
     }
     const ok = byKey || hintCount >= 2 || (wine && (wine.unique || hintCount >= 1));
     if (!ok) continue;
@@ -445,7 +459,7 @@ function shutter(state) { scanBtn.dataset.state = state; scanBtn.disabled = stat
 function banner(big, small) {
   if (!big) { bannerEl.classList.remove("show"); return; }
   document.getElementById("bannerBig").textContent = big;
-  document.getElementById("bannerSmall").textContent = small || "";
+  document.getElementById("bannerSmall").innerHTML = (small || "").replace("[+]", "<b>+</b>");
   bannerEl.classList.add("show");
 }
 async function scan() {
@@ -482,7 +496,7 @@ async function scan() {
       });
       currentResult = results.length ? results[0].r : null; // card is only used in label mode
       setStatus(results.length ? `${results.length} wine${results.length > 1 ? "s" : ""} found · ${ms} ms` : `No match · ${ms} ms`, true);
-      if (!results.length) banner("No wines found", "Tap ↺ and try closer or in better light");
+      if (!results.length) banner("No wines found", "Tap ↺, move closer or find better light");
     } else {
       labelText.push(data.text || "");
       const r = identify(labelText, false, { list: false });
@@ -496,7 +510,7 @@ async function scan() {
         shutter("live");
       } else if (labelText.length < 2) {
         setStatus("No match", true);
-        banner("No match", "Add a photo of the back label, then tap +");
+        banner("No match", "Add a photo of the back label, then tap [+]");
         shutter("add");
         video.play(); frozen = false; // back to live so the next photo can be framed
       } else {
@@ -626,6 +640,10 @@ function openChooser(a) {
 }
 function closeChooser() { chooserEl.classList.remove("show"); document.getElementById("sheetBg").classList.remove("show"); }
 document.getElementById("cCancel").addEventListener("click", closeChooser);
+document.getElementById("cAdd").addEventListener("click", () => {
+  closeChooser(); frozen = false; video.play(); shutter("add");
+  banner("Producer found", "Add a photo of the front label, then tap [+]");
+});
 document.getElementById("sheetBg").addEventListener("click", closeChooser);
 
 // ---------- Manual entry ----------
