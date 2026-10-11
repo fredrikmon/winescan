@@ -377,11 +377,7 @@ async function scan() {
         if (!i) return true; const p = results[i - 1];
         return Math.min(p.box.y1, it.box.y1) - Math.max(p.box.y0, it.box.y0) <= 0.5 * Math.min(p.box.y1 - p.box.y0, it.box.y1 - it.box.y0);
       });
-      if (results.length) {
-        const mid = work.height / 2;
-        const c = [...results].sort((a, b) => Math.abs((a.box.y0 + a.box.y1) / 2 - mid) - Math.abs((b.box.y0 + b.box.y1) / 2 - mid))[0];
-        showResult(c.r);
-      }
+      currentResult = results.length ? results[0].r : null; // card is only used in label mode
       setStatus(results.length ? `${results.length} wine${results.length > 1 ? "s" : ""} found · ${ms} ms` : `No match · ${ms} ms`, true);
     } else {
       const r = identify(data.text || "", false);
