@@ -78,9 +78,25 @@
     font: 500 14px var(--font-ui); padding: 11px 14px; border-radius: 999px; cursor: pointer;
   }
   .btn:focus-visible, .seg button:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
-  #spacer { flex: 1; }
-  .btn.scan { background: var(--fg); color: var(--badge-fg); font-weight: 600; padding: 11px 22px; min-width: 120px; }
-  .btn.scan:disabled { opacity: .6; }
+  #controls { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; }
+  #controls .seg { justify-self: start; }
+  #controls #dbg { justify-self: end; }
+  .shutter { position: relative; width: 78px; height: 78px; border-radius: 50%; border: 0; background: transparent; padding: 0; cursor: pointer; justify-self: center; }
+  .shutter .ring { position: absolute; inset: 0; border-radius: 50%; border: 4px solid var(--fg); }
+  .shutter .glyph { position: absolute; inset: 8px; border-radius: 50%; background: var(--fg); display: grid; place-items: center; color: var(--badge-fg); font: 700 34px var(--font-ui); transition: transform .12s; }
+  .shutter:active .glyph { transform: scale(.92); }
+  .shutter:disabled .glyph { background: #8d8079; }
+  .shutter[data-state="add"] .glyph::after { content: "+"; line-height: 1; }
+  .shutter[data-state="live"] .glyph { background: transparent; border: 3px solid var(--fg); color: var(--fg); }
+  .shutter[data-state="live"] .glyph::after { content: "↺"; font-size: 30px; line-height: 1; }
+  .shutter[data-state="busy"] .glyph { background: #8d8079; }
+  .shutter[data-state="busy"] .ring { border-top-color: transparent; animation: spin .9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #banner { position: absolute; left: 20px; right: 20px; top: 42%; transform: translateY(-50%); text-align: center; pointer-events: none; display: none;
+    background: rgba(14,10,11,.78); border-radius: 18px; padding: 18px 16px; backdrop-filter: blur(6px); }
+  #banner.show { display: block; }
+  #banner .big { font-family: var(--font-score); font-weight: 700; font-size: 30px; line-height: 1.05; }
+  #banner .small { font-size: 15px; color: var(--muted); margin-top: 6px; }
 
   #debug {
     display: none; font: 11px/1.35 ui-monospace, Menlo, monospace; color: var(--muted);
@@ -125,6 +141,16 @@
     border-radius: 20px 20px 0 0; padding: 18px 20px calc(env(safe-area-inset-bottom, 0px) + 22px);
     transform: translateY(105%); transition: transform .24s ease-out; }
   #manual.show { transform: none; }
+  #chooser { position: fixed; left: 0; right: 0; bottom: 0; z-index: 21; background: var(--badge); color: var(--badge-fg);
+    border-radius: 20px 20px 0 0; padding: 18px 20px calc(env(safe-area-inset-bottom, 0px) + 22px);
+    transform: translateY(105%); transition: transform .24s ease-out; }
+  #chooser.show { transform: none; }
+  #chooser h2 { font-family: var(--font-score); font-weight: 700; font-size: 24px; margin: 0 0 4px; }
+  #chooser p { font-size: 14px; color: #5a3a40; margin: 0 0 12px; }
+  #chooser .chip { display: flex; justify-content: space-between; align-items: baseline; width: 100%; text-align: left;
+    border: 1px solid #c9b8b0; background: #fff; color: var(--badge-fg); border-radius: 12px; padding: 12px 14px; margin-bottom: 8px; font: 500 16px var(--font-ui); cursor: pointer; }
+  #chooser .chip b { font-family: var(--font-score); font-size: 17px; }
+  #chooser .actions { margin-top: 8px; } #chooser .btn.ghost { background: #e6dcd3; color: var(--badge-fg); }
   #manual h2 { font-family: var(--font-score); font-weight: 700; font-size: 24px; margin: 0 0 4px; }
   #manual p { font-size: 14px; color: #5a3a40; margin: 0 0 12px; }
   #manual label { display: block; font-size: 12px; color: #5a3a40; margin: 10px 0 4px; letter-spacing: .06em; text-transform: uppercase; }
@@ -144,7 +170,7 @@
 
 <div id="gate">
   <h1>Point the camera at a wine list or a label.</h1>
-  <p>Test build. Frame the list, tap Scan. Finca Sandoval is in the catalog. Text is read on your phone, nothing is uploaded.</p>
+  <p>Test build. Frame the list or label and tap the round button. Finca Sandoval is in the catalog. Text is read on your phone, nothing is uploaded.</p>
   <button id="start" class="btn primary">Start camera</button>
   <p id="gateMsg"></p>
 </div>
@@ -152,6 +178,7 @@
 <div id="stage">
   <video id="video" autoplay playsinline muted></video>
   <canvas id="overlay"></canvas>
+  <div id="banner" role="status"><div class="big" id="bannerBig"></div><div class="small" id="bannerSmall"></div></div>
   <div id="top">
     <div id="brand">WineScan</div>
     <div id="status">Loading…</div>
@@ -165,11 +192,10 @@
     </div>
     <div id="controls">
       <div class="seg" role="group" aria-label="Mode">
-        <button id="modeList" aria-pressed="true">Wine list</button>
+        <button id="modeList" aria-pressed="true">List</button>
         <button id="modeLabel" aria-pressed="false">Label</button>
       </div>
-      <div id="spacer"></div>
-      <button id="scan" class="btn scan">Scan</button>
+      <button id="scan" class="shutter" aria-label="Scan" data-state="scan"><span class="ring"></span><span class="glyph"></span></button>
       <button id="dbg" class="btn" aria-label="Show raw text">Text</button>
     </div>
   </div>
@@ -188,6 +214,12 @@
   <div id="sVintages"></div>
 </div>
 
+<div id="chooser" role="dialog" aria-modal="true">
+  <h2 id="cTitle"></h2>
+  <p>The label shows the producer but not which wine. Tap the right one.</p>
+  <div id="cChips"></div>
+  <div class="actions"><button class="btn ghost" id="cCancel">Cancel</button></div>
+</div>
 <div id="manual" role="dialog" aria-modal="true">
   <h2>Which producer?</h2>
   <p>Nothing matched the label. Type the producer, and the wine if you know it.</p>
@@ -206,7 +238,8 @@
 <script>
 // ---------- Catalog. Add producers and wines here; matching is data driven. ----------
 // keys: words that identify the entry in OCR text. hints: other label words that prove the producer.
-// A wine with no keys is the producer's base wine, used when no other wine key is found.
+// base: the producer's flagship that carries only the producer name. Wine lists fall back to it;
+// labels must show its key on the front photo, otherwise the user is asked to choose.
 // unique: the wine name alone identifies the producer (no other producer uses it).
 const CATALOG = [
   {
@@ -214,7 +247,7 @@ const CATALOG = [
     keys: ["sandoval", "fincasandoval"],
     hints: ["ledana", "casablanca", "calcareo", "vinosconalma", "manchuela", "vinodepueblo", "cepasviejas", "autoctonas"],
     wines: [
-      { name: "Finca Sandoval", keys: [], scores: { 2023: "95", 2022: "95" },
+      { name: "Finca Sandoval", keys: ["fincasandoval"], base: true, scores: { 2023: "95", 2022: "95" },
         grapes: "Syrah, Bobal", style: "Red · full bodied",
         notes: "The flagship. Old vines on limestone at 900 m. Dense dark fruit, fine tannin, long finish. Built to age ten years or more." },
       { name: "Salia", keys: ["salia"], unique: false, scores: { 2024: "94", 2022: "93+" },
@@ -267,7 +300,24 @@ function fuzzyIn(hay, word, tol) {
   return false;
 }
 function keyHit(tokens, glued, word) {
-  return tokens.some(t => tokenMatches(t, word)) || fuzzyIn(glued, word, Math.max(tolFor(word), word.length >= 8 ? 2 : 0));
+  return tokens.some(t => tokenMatches(t, word))
+    || fuzzyIn(glued, word, Math.max(tolFor(word), word.length >= 8 ? 2 : 0))
+    || fragmentHit(tokens, word);
+}
+// Labels stack names across lines ("SA / LIA", "FUN / DA / MEN / TA / LISTA") and OCR may return the
+// lines in any order. A key is hit if it can be assembled from short tokens present in the text.
+function fragmentHit(tokens, word) {
+  const set = new Set(tokens.filter(t => t.length >= 2 && t.length <= 6 && word.includes(t)));
+  if (!set.size) return false;
+  const n = word.length, memo = new Array(n + 1).fill(null);
+  const ok = i => {
+    if (i === n) return true;
+    if (memo[i] !== null) return memo[i];
+    let res = false;
+    for (let len = 2; len <= 6 && i + len <= n && !res; len++) if (set.has(word.slice(i, i + len))) res = ok(i + len);
+    return memo[i] = res;
+  };
+  return ok(0) && [...set].some(t => t.length >= 3);
 }
 // OCR often misreads 0/O, 1/l, 5/S in years. Normalize before matching.
 function findVintage(tokens) {
@@ -280,28 +330,43 @@ function findVintage(tokens) {
 }
 function latestVintage(w) { return Math.max(...Object.keys(w.scores).map(Number)); }
 
-// Returns {producer, wine, vintage, latest} or null.
-function identify(text, strict) {
-  const tokens = norm(text).split(" ").filter(Boolean);
-  const glued = tokens.join("");
-  const vintage = findVintage(tokens);
+// identify(texts, opts): texts is one string (a list row) or an array of photo texts (label, front first).
+// Returns {producer, wine, ...}, or {producer, ambiguous: true, candidates} when the producer is known
+// but the wine is not, or null.
+function identify(texts, strict, opts = {}) {
+  const arr = Array.isArray(texts) ? texts : [texts];
+  const all = norm(arr.join(" ")).split(" ").filter(Boolean), glued = all.join("");
+  const first = norm(arr[0] || "").split(" ").filter(Boolean), gluedFirst = first.join("");
+  const vintage = findVintage(all);
+  const listMode = opts.list !== false; // single string = list row unless told otherwise
   let best = null;
   for (const p of CATALOG) {
-    const byKey = p.keys.some(k => keyHit(tokens, glued, k));
+    const byKey = p.keys.some(k => keyHit(all, glued, k));
     const hintCount = (p.hints || []).filter(h => fuzzyIn(glued, h, tolFor(h))).length;
     let wine = null;
-    for (const w of p.wines) if (w.keys.length && w.keys.some(k => keyHit(tokens, glued, k))) { wine = w; break; }
-    // Evidence: producer name, or two label hints, or a distinctive wine name, or a wine name plus one hint.
+    for (const w of p.wines) if (!w.base && w.keys.some(k => keyHit(all, glued, k))) { wine = w; break; }
+    const baseWine = p.wines.find(w => w.base);
+    if (!wine && baseWine) {
+      if (listMode) wine = baseWine; // "Finca Sandoval" on a list means the flagship
+      else if (baseWine.keys.some(k => keyHit(first, gluedFirst, k))) wine = baseWine; // front label says it
+    }
     const ok = byKey || hintCount >= 2 || (wine && (wine.unique || hintCount >= 1));
     if (!ok) continue;
-    if (!wine) wine = p.wines.find(w => !w.keys.length) || null;
-    if (!wine) continue;
     if (strict && !vintage) continue;
-    const r = { producer: p, wine, vintage, latest: latestVintage(wine), score: wine.scores[latestVintage(wine)] };
+    if (!wine) {
+      if (!best) best = { producer: p, ambiguous: true, candidates: p.wines, vintage, byKey };
+      continue;
+    }
+    const r = { producer: p, wine, vintage, latest: latestVintage(wine), score: wine.scores[latestVintage(wine)], byKey };
     if (vintage) r.scanned = wine.scores[vintage] || null;
-    if (!best || (byKey && !best.byKey)) best = Object.assign(r, { byKey });
+    if (!best || best.ambiguous || (byKey && !best.byKey)) best = r;
   }
   return best;
+}
+function fromChoice(p, wine, vintage) {
+  const r = { producer: p, wine, vintage, latest: latestVintage(wine), score: wine.scores[latestVintage(wine)] };
+  if (vintage) r.scanned = wine.scores[vintage] || null;
+  return r;
 }
 function pathOf(r) { return `${r.producer.country} > ${r.producer.region} > ${r.producer.producer} > ${r.wine.name}`; }
 
@@ -332,8 +397,8 @@ async function initOCR() {
     logger: m => { if (m.status === "loading tesseract core" || m.status === "loading language traineddata") setStatus(`Loading ${Math.round((m.progress||0)*100)}%`); }
   });
   await applyMode();
-  setStatus("Ready. Frame the list and tap Scan.", true);
-  scanBtn.disabled = false;
+  setStatus("Ready", true);
+  shutter("scan");
 }
 async function applyMode() {
   if (!worker) return;
@@ -375,9 +440,17 @@ function coverMap() {
 
 // ---------- Scan: freeze frame, read once, place badges ----------
 const scanBtn = document.getElementById("scan");
+const bannerEl = document.getElementById("banner");
+function shutter(state) { scanBtn.dataset.state = state; scanBtn.disabled = state === "busy"; }
+function banner(big, small) {
+  if (!big) { bannerEl.classList.remove("show"); return; }
+  document.getElementById("bannerBig").textContent = big;
+  document.getElementById("bannerSmall").textContent = small || "";
+  bannerEl.classList.add("show");
+}
 async function scan() {
   if (busy || !worker || !video.videoWidth) return;
-  busy = true; scanBtn.disabled = true; scanBtn.textContent = "Reading…";
+  busy = true; shutter("busy"); banner(null);
   results = []; badgeRects = []; resultEl.classList.remove("show");
   try {
     // Freeze: pausing the video keeps the last frame on screen.
@@ -409,35 +482,41 @@ async function scan() {
       });
       currentResult = results.length ? results[0].r : null; // card is only used in label mode
       setStatus(results.length ? `${results.length} wine${results.length > 1 ? "s" : ""} found · ${ms} ms` : `No match · ${ms} ms`, true);
+      if (!results.length) banner("No wines found", "Tap ↺ and try closer or in better light");
     } else {
       labelText.push(data.text || "");
-      const r = identify(labelText.join("\n"), false);
-      if (r) {
+      const r = identify(labelText, false, { list: false });
+      if (r && r.ambiguous) {
+        setStatus("Producer found. Which wine?", true);
+        shutter("live"); frozen = true; video.pause();
+        openChooser(r);
+      } else if (r) {
         showResult(r);
         setStatus(`Match · ${ms} ms`, true);
-        scanBtn.textContent = "Back to live";
+        shutter("live");
       } else if (labelText.length < 2) {
-        setStatus("No match. Scan the back label or more text.", true);
-        scanBtn.textContent = "Add photo";
+        setStatus("No match", true);
+        banner("No match", "Add a photo of the back label, then tap +");
+        shutter("add");
         video.play(); frozen = false; // back to live so the next photo can be framed
       } else {
-        setStatus("No match after 2 photos. Enter the producer.", true);
-        scanBtn.textContent = "Back to live";
+        setStatus("No match after 2 photos", true);
+        shutter("live");
         openManual();
       }
     }
   } catch (e) {
     setStatus("Read failed: " + (e.message || e));
   } finally {
-    busy = false; scanBtn.disabled = false;
-    if (mode === "list") scanBtn.textContent = "Back to live";
+    busy = false;
+    if (mode === "list") shutter("live");
     drawOverlay();
   }
 }
 function unfreeze() {
   frozen = false; results = []; badgeRects = []; currentResult = null; labelText = [];
-  resultEl.classList.remove("show"); video.play();
-  scanBtn.textContent = "Scan"; setStatus("Live. Tap Scan.", true);
+  resultEl.classList.remove("show"); video.play(); banner(null);
+  shutter("scan"); setStatus("Live", true);
   drawOverlay();
 }
 
@@ -531,6 +610,24 @@ let touchY = null;
 document.getElementById("sheet").addEventListener("touchstart", e => { touchY = e.touches[0].clientY; }, { passive: true });
 document.getElementById("sheet").addEventListener("touchend", e => { if (touchY !== null && e.changedTouches[0].clientY - touchY > 70 && document.getElementById("sheet").scrollTop === 0) closeSheet(); touchY = null; }, { passive: true });
 
+// ---------- Wine chooser ----------
+const chooserEl = document.getElementById("chooser");
+function openChooser(a) {
+  document.getElementById("cTitle").textContent = a.producer.producer;
+  const box = document.getElementById("cChips"); box.innerHTML = "";
+  for (const w of a.candidates) {
+    const b = document.createElement("button"); b.className = "chip";
+    const lv = latestVintage(w);
+    b.innerHTML = `<span>${w.name}</span><b>Parker ${w.scores[lv]}p (${lv})</b>`;
+    b.addEventListener("click", () => { closeChooser(); showResult(fromChoice(a.producer, w, a.vintage)); setStatus("Match · chosen", true); frozen = true; video.pause(); shutter("live"); });
+    box.appendChild(b);
+  }
+  document.getElementById("sheetBg").classList.add("show"); chooserEl.classList.add("show");
+}
+function closeChooser() { chooserEl.classList.remove("show"); document.getElementById("sheetBg").classList.remove("show"); }
+document.getElementById("cCancel").addEventListener("click", closeChooser);
+document.getElementById("sheetBg").addEventListener("click", closeChooser);
+
 // ---------- Manual entry ----------
 const manualEl = document.getElementById("manual");
 function openManual() {
@@ -543,10 +640,11 @@ function closeManual() { manualEl.classList.remove("show"); document.getElementB
 document.getElementById("mCancel").addEventListener("click", closeManual);
 document.getElementById("mGo").addEventListener("click", () => {
   const typed = document.getElementById("mProducer").value + " " + document.getElementById("mWine").value;
-  const r = identify(labelText.join("\n") + "\n" + typed, false);
+  const r = identify([...labelText, typed], false, { list: false });
+  if (r && r.ambiguous) { closeManual(); openChooser(r); return; }
   if (!r) { document.getElementById("mErr").textContent = "Still no match. Not in the catalog yet."; return; }
   closeManual(); showResult(r); setStatus("Match · manual", true);
-  frozen = true; video.pause(); scanBtn.textContent = "Back to live";
+  frozen = true; video.pause(); shutter("live");
 });
 document.getElementById("sheetBg").addEventListener("click", closeManual);
 
@@ -558,7 +656,7 @@ document.getElementById("start").addEventListener("click", async () => {
     await startCamera();
     gate.style.display = "none";
     sizeOverlay();
-    scanBtn.disabled = true;
+    shutter("busy");
     await initOCR();
   } catch (e) {
     gateMsg.className = "err";
