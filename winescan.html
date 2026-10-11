@@ -199,9 +199,8 @@ function keyHit(tokens, glued, word) {
 // OCR often misreads 0/O, 1/l, 5/S in years. Normalize before matching.
 function findVintage(tokens) {
   for (const t of tokens) {
-    if (t.length < 4 || t.length > 5) continue;
-    const fixed = t.replace(/[oq]/g, "0").replace(/[il|t]/g, "1").replace(/z/g, "2").replace(/e/g, "3").replace(/a/g, "4")
-      .replace(/s/g, "5").replace(/b/g, "8").replace(/g/g, "9").slice(0, 4);
+    if (t.length !== 4) continue;
+    const fixed = t.replace(/o/g, "0").replace(/[il|]/g, "1");
     if (/^(19|20)\d\d$/.test(fixed)) { const y = +fixed; if (y >= 1990 && y <= 2030) return y; }
   }
   return null;
@@ -298,7 +297,7 @@ async function tick() {
   if (!paused && !busy && worker && video.videoWidth) {
     busy = true;
     try {
-      const target = 800;
+      const target = 900;
       const k = Math.min(1, target / video.videoWidth);
       const bandTop = Math.round(video.videoHeight * CROP), bandH = Math.round(video.videoHeight * (1 - 2 * CROP));
       work.width = Math.round(video.videoWidth * k);
@@ -332,16 +331,15 @@ function handleLines(lines, fullText) {
   if (mode === "list") {
     // Per line, plus a two-line window so a wrapped name still matches.
     // One badge per wine and vintage; the box follows the latest sighting.
-    for (let i = 0; i < lines.length; i++) {
-      const l = lines[i], nx = lines[i + 1];
-      let r = identify(l.text, true), box = l.bbox;
-      if (!r && nx) {
-        r = identify(l.text + " " + nx.text, true);
-        if (r) box = findVintage(norm(nx.text).split(" ")) ? nx.bbox : l.bbox;
-      }
-      if (r) sticky.set(r.wine.name + "#" + r.vintage, { r, box, until: now + 3500 });
+    for (const l of lines) {
+      const r = identify(l.text, false);
+      if (!r) continue;
+      // One badge per wine and row; the row band absorbs small camera drift.
+      const key = r.wine.name + "#" + Math.round(l.bbox.y0 / 40);
+      const prev = sticky.get(key);
+      sticky.set(key, { r, box: l.bbox, until: now + 3500, seen: (prev ? prev.seen : 0) + 1 });
     }
-    const live = [...sticky.values()].filter(s => s.until > now);
+    const live = [...sticky.values()].filter(s => s.until > now && s.seen >= 2);
     if (live.length) {
       const mid = work.height / 2;
       live.sort((a, b) => Math.abs((a.box.y0 + a.box.y1) / 2 - mid) - Math.abs((b.box.y0 + b.box.y1) / 2 - mid));
@@ -357,9 +355,7 @@ function showResult(r, until) {
   document.getElementById("rScore").textContent = r.score + "p";
   document.getElementById("rLatest").textContent = `(${r.latest})`;
   document.getElementById("rName").textContent = pathOf(r);
-  let note = "";
-  if (r.vintage && r.vintage !== r.latest) note = r.scanned ? `Scanned ${r.vintage}: Parker ${r.scanned}p` : `Scanned ${r.vintage}: not rated`;
-  document.getElementById("rNote").textContent = note;
+  document.getElementById("rNote").textContent = "";
   resultEl.classList.add("show");
   lastResult.until = until;
 }
@@ -376,6 +372,7 @@ function drawOverlay() {
   const items = [];
   for (const [key, s] of sticky) {
     if (!paused && s.until < now) { sticky.delete(key); continue; }
+    if (s.seen < 2) continue;
     const [x0, y0] = map(s.box.x0, s.box.y0), [x1, y1] = map(s.box.x1, s.box.y1);
     items.push({ s, x0, y0, x1, y1 });
   }
@@ -389,7 +386,7 @@ function drawOverlay() {
   }
 
   // Lay out badges in a right column, pushed down so they never overlap.
-  const PAD = 10, GAP = 6, BW = Math.min(230, W * 0.62), BH = 48;
+  const PAD = 8, GAP = 6, BW = Math.min(190, W * 0.5), BH = 46;
   let lastBottom = -Infinity;
   for (const it of rows) {
     const r = it.s.r;
@@ -408,14 +405,14 @@ function drawOverlay() {
 
     octx.fillStyle = "#f6efe8";
     roundRect(bx, by, BW, BH, 9); octx.fill();
-    const big = r.scanned ? "Parker " + r.scanned + "p" : "Not rated · latest " + r.score + "p (" + r.latest + ")";
-    const small = `${r.producer.producer} · ${r.wine.name}${r.vintage ? " · " + r.vintage : ""}`;
+    const big = "Parker " + r.score + "p (" + r.latest + ")";
+    const small = `${r.producer.producer} · ${r.wine.name}`;
     octx.fillStyle = "#2a0f14"; octx.textBaseline = "alphabetic";
-    octx.font = (r.scanned ? "700 18px" : "700 13px") + " Fraunces, Georgia, serif";
-    octx.fillText(fit(big, BW - 20), bx + 10, by + 21);
+    octx.font = "700 18px Fraunces, Georgia, serif";
+    octx.fillText(fit(big, BW - 20), bx + 10, by + 20);
     octx.fillStyle = "#5a3a40";
     octx.font = "500 11.5px 'Inter Tight', system-ui, sans-serif";
-    octx.fillText(fit(small, BW - 20), bx + 10, by + 38);
+    octx.fillText(fit(small, BW - 20), bx + 10, by + 36);
     octx.globalAlpha = 1;
   }
 }
